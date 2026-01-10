@@ -50,10 +50,18 @@ POLYMARKET_PRIVATE_KEY=your_private_key
 POLYMARKET_FUNDER_ADDRESS=your_wallet_address
 ```
 
-### 3. הרצת בוט
+### 3. הרצת בוט (CLI חדש)
+
+הרצה עם חשבון יחיד (קובץ `.env` אחד):
 
 ```bash
-python -m strategies.example_bot.run
+python main.py --strategy extreme_price --env config/.env
+```
+
+הרצה במקביל עם מספר חשבונות (כל חשבון בקובץ `.env` נפרד):
+
+```bash
+python main.py --strategy arbitrage --env config/account1.env --env config/account2.env
 ```
 
 ## 📚 איך לבנות בוט חדש
@@ -66,18 +74,27 @@ python -m strategies.example_bot.run
 ## 🛠️ Core Modules
 
 ### Connection
-התומך באופן אוטומטי בשני סוגי ארנקים:
+
+תומך באופן אוטומטי בשני סוגי ארנקים, ויכול לקבל מפתחות מוזרמים (לריבוי חשבונות):
+
 - **Proxy Wallets** (Email/Google) - עם FUNDER_ADDRESS
 - **EOA Wallets** (MetaMask) - ללא FUNDER_ADDRESS
 
 ```python
 from core.connection import PolymarketConnection
 
-conn = PolymarketConnection()  # זיהוי אוטומטי של סוג הארנק
+conn = PolymarketConnection(  # הזרמת מפתחות מאפשרת ריבוי חשבונות במקביל
+    api_key="...",
+    api_secret="...",
+    api_passphrase="...",
+    private_key="...",
+    funder_address="...",     # לא חובה ב-EOA
+)
 markets = conn.get_markets()
 ```
 
 ### Scanner
+
 ```python
 from core.scanner import MarketScanner
 
@@ -86,6 +103,7 @@ opportunities = scanner.scan_for_opportunities(filters={...})
 ```
 
 ### Executor
+
 מטפל ב-Partial Fills ומעקב אחר גודל פוזיציות אמיתי:
 
 ```python

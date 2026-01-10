@@ -28,7 +28,8 @@ class BaseStrategy(ABC):
         self,
         strategy_name: str = "BaseStrategy",
         scan_interval: int = 300,
-        log_level: str = "INFO"
+        log_level: str = "INFO",
+        connection: Optional[PolymarketConnection] = None
     ):
         """
         אתחול אסטרטגיה.
@@ -45,8 +46,8 @@ class BaseStrategy(ABC):
         setup_logging(log_level=log_level)
         logger.info(f"🤖 Initializing {strategy_name}")
         
-        # Initialize core components
-        self.connection = PolymarketConnection()
+        # Initialize core components (accept injected connection for multi-account support)
+        self.connection = connection if connection is not None else PolymarketConnection()
         self.scanner = MarketScanner()
         self.executor = TradeExecutor(self.connection)
         self.ws_manager = WebSocketManager()

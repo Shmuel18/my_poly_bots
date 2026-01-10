@@ -15,7 +15,7 @@
 ```
 שוק 1: Bitcoin above $100k by Dec 31?
   ASK (לקנייה): $0.45
-  
+
 שוק 2: Bitcoin above $100k by Dec 15?
   BID (למכירה): $0.50
 
