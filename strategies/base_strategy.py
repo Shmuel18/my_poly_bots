@@ -44,10 +44,12 @@ class BaseStrategy(ABC):
         
         # Setup logging
         setup_logging(log_level=log_level)
-        logger.info(f"🤖 Initializing {strategy_name}")
         
         # Initialize core components (accept injected connection for multi-account support)
         self.connection = connection if connection is not None else PolymarketConnection()
+        wallet_short = (self.connection.get_address() or '')[:6]
+        self.logger = logging.getLogger(f"{strategy_name}_{wallet_short}")
+        self.logger.info(f"🤖 Initializing {strategy_name} ({wallet_short})")
         self.scanner = MarketScanner()
         self.executor = TradeExecutor(self.connection)
         self.ws_manager = WebSocketManager()
@@ -120,11 +122,11 @@ class BaseStrategy(ABC):
         size = opportunity.get('size', 10)
         
         if not token_id or not price:
-            logger.warning("Missing token_id or price")
+            self.logger.warning("Missing token_id or price")
             return False
         
-        logger.info(f"🎯 Entering position: {opportunity.get('question', '')[:50]}")
-        logger.info(f"   {size} units @ ${price:.4f}")
+        self.logger.info(f"🎯 Entering position: {opportunity.get('question', '')[:50]}")
+        self.logger.info(f"   {size} units @ ${price:.4f}")
         
         result = self.executor.execute_trade(
             token_id=token_id,
@@ -141,7 +143,7 @@ class BaseStrategy(ABC):
                 'size': size
             }
             self.stats['trades_entered'] += 1
-            logger.info("✅ Position entered successfully")
+            self.logger.info("✅ Position entered successfully")
             return True
         
         return False
@@ -165,7 +167,7 @@ class BaseStrategy(ABC):
         if not position:
             return False
         
-        logger.info(f"🚪 Exiting position: {position.get('question', '')[:50]}")
+        self.logger.info(f"🚪 Exiting position: {position.get('question', '')[:50]}")
         
         result = self.executor.close_position(token_id, exit_price)
         
@@ -176,7 +178,7 @@ class BaseStrategy(ABC):
             self.stats['trades_exited'] += 1
             self.stats['total_pnl'] += pnl
             
-            logger.info(f"✅ Position exited: ${pnl:.2f} ({pnl_pct:+.1f}%)")
+            self.logger.info(f"✅ Position exited: ${pnl:.2f} ({pnl_pct:+.1f}%)")
             
             del self.open_positions[token_id]
             return True
@@ -188,13 +190,13 @@ class BaseStrategy(ABC):
         while self.running:
             try:
                 self.stats['scans'] += 1
-                logger.info(f"🔍 Scan #{self.stats['scans']}")
+                self.logger.info(f"🔍 Scan #{self.stats['scans']}")
                 
                 # Scan for opportunities
                 opportunities = await self.scan()
                 
                 if opportunities:
-                    logger.info(f"💡 Found {len(opportunities)} opportunities")
+                    self.logger.info(f"💡 Found {len(opportunities)} opportunities")
                     self.stats['opportunities_found'] += len(opportunities)
                     
                     # Check each opportunity
@@ -215,7 +217,7 @@ class BaseStrategy(ABC):
                 await asyncio.sleep(self.scan_interval)
                 
             except Exception as e:
-                logger.error(f"Error in scan loop: {e}")
+                self.logger.error(f"Error in scan loop: {e}")
                 await asyncio.sleep(60)
     
     async def monitor_loop(self):
@@ -230,7 +232,7 @@ class BaseStrategy(ABC):
                 await asyncio.sleep(30)  # Check every 30 seconds
                 
             except Exception as e:
-                logger.error(f"Error in monitor loop: {e}")
+                self.logger.error(f"Error in monitor loop: {e}")
                 await asyncio.sleep(60)
     
     async def stats_loop(self):
@@ -238,27 +240,27 @@ class BaseStrategy(ABC):
         while self.running:
             await asyncio.sleep(600)  # Every 10 minutes
             
-            logger.info("="*60)
-            logger.info(f"📊 {self.strategy_name} Statistics")
-            logger.info(f"   Scans: {self.stats['scans']}")
-            logger.info(f"   Opportunities: {self.stats['opportunities_found']}")
-            logger.info(f"   Trades Entered: {self.stats['trades_entered']}")
-            logger.info(f"   Trades Exited: {self.stats['trades_exited']}")
-            logger.info(f"   Total P&L: ${self.stats['total_pnl']:.2f}")
-            logger.info(f"   Open Positions: {len(self.open_positions)}")
-            logger.info("="*60)
+            self.logger.info("="*60)
+            self.logger.info(f"📊 {self.strategy_name} Statistics")
+            self.logger.info(f"   Scans: {self.stats['scans']}")
+            self.logger.info(f"   Opportunities: {self.stats['opportunities_found']}")
+            self.logger.info(f"   Trades Entered: {self.stats['trades_entered']}")
+            self.logger.info(f"   Trades Exited: {self.stats['trades_exited']}")
+            self.logger.info(f"   Total P&L: ${self.stats['total_pnl']:.2f}")
+            self.logger.info(f"   Open Positions: {len(self.open_positions)}")
+            self.logger.info("="*60)
     
     async def start(self):
         """מתחיל את האסטרטגיה"""
         self.running = True
         
-        logger.info("="*60)
-        logger.info(f"🚀 Starting {self.strategy_name}")
-        logger.info("="*60)
+        self.logger.info("="*60)
+        self.logger.info(f"🚀 Starting {self.strategy_name}")
+        self.logger.info("="*60)
         
         # Check balance
         balance = await self.executor.get_balance()
-        logger.info(f"💰 Balance: ${balance:.2f} USDC")
+        self.logger.info(f"💰 Balance: ${balance:.2f} USDC")
         
         # Start loops
         await asyncio.gather(
@@ -269,5 +271,5 @@ class BaseStrategy(ABC):
     
     def stop(self):
         """עוצר את האסטרטגיה"""
-        logger.info(f"🛑 Stopping {self.strategy_name}")
+        self.logger.info(f"🛑 Stopping {self.strategy_name}")
         self.running = False

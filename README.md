@@ -80,7 +80,17 @@ python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --en
 python main.py --strategy-path strategies/my_strategy.py --env config/.env
 ```
 
-הקונסטרקטור של אסטרטגיה דינמית צפוי לפחות לקבל `connection` ו-`log_level`. אם יש פרמטרים נוספים, ניתן להגדיר ערכי ברירת מחדל בתוך המחלקה עצמה.
+הקונסטרקטור של אסטרטגיה דינמית צפוי לפחות לקבל `connection` ו-`log_level`. אם יש פרמטרים נוספים, ניתן להעביר אותם דרך `--strategy-args` (JSON):
+
+```bash
+# דוגמה: שינוי פרמטרים לארביטראז' (Built-in)
+python main.py --strategy arbitrage --env config/.env --strategy-args "{\"min_profit_pct\": 3.5, \"scan_interval\": 120}"
+
+# דוגמה: אסטרטגיה דינמית עם kwargs מותאמים
+python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --env config/.env --strategy-args "{\"threshold\": 0.5, \"max_positions\": 5}"
+```
+
+טיפ: בהפעלת מספר חשבונות במקביל, שם ה-logger כולל קיצור כתובת הארנק כדי להבדיל בין התהליכים (למשל `ArbitrageStrategy_0x1234`).
 ```
 
 ## 📚 איך לבנות בוט חדש
