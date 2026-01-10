@@ -10,6 +10,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import logging
 from typing import List, Optional, Type
 
 from dotenv import dotenv_values
@@ -21,7 +22,7 @@ from strategies.extreme_price import ExtremePriceStrategy
 from strategies.arbitrage import ArbitrageStrategy
 
 
-def load_connection_from_env(env_path: Optional[str]) -> PolymarketConnection:
+def load_connection_from_env(env_path: Optional[str], dry_run: bool = False) -> PolymarketConnection:
     """Load credentials from an .env file and create a connection."""
     if env_path:
         creds = dotenv_values(env_path)
@@ -36,6 +37,7 @@ def load_connection_from_env(env_path: Optional[str]) -> PolymarketConnection:
         funder_address=creds.get('POLYMARKET_FUNDER_ADDRESS'),
         clob_url=creds.get('CLOB_URL'),
         chain_id=int(creds.get('CHAIN_ID')) if creds.get('CHAIN_ID') else None,
+        dry_run=dry_run,
     )
 
 
@@ -46,9 +48,9 @@ async def run_strategy(
     strategy_kwargs: Optional[dict] = None,
     log_level: str = 'INFO',
     dry_run: bool = False,
-) -> None:
-    """Instantiate and run the selected strategy for each env file."""
-    tasks = []
+) -> List:
+    """Instantiate the selected strategy for each env file and return instances."""
+    strategies = []
     
     StrategyClass: Optional[Type] = None
     if strategy_path:
@@ -59,14 +61,19 @@ async def run_strategy(
         strategy_kwargs.setdefault('dry_run', True)
     
     for idx, env_path in enumerate(env_paths or [None]):
-        connection = load_connection_from_env(env_path)
+        connection = load_connection_from_env(env_path, dry_run=dry_run)
         
         if StrategyClass is not None:
             # For dynamically loaded strategies, assume constructor accepts at least `connection` and optional `log_level`.
             try:
                 strategy = StrategyClass(connection=connection, log_level=log_level, **strategy_kwargs)
             except TypeError as e:
-                raise SystemExit(f"Failed to initialize strategy from {strategy_path}: {e}")
+                import inspect
+                sig = inspect.signature(StrategyClass)
+                allowed = ", ".join(sig.parameters.keys())
+                raise SystemExit(
+                    f"Failed to initialize strategy from {strategy_path}: {e}. Allowed parameters: {allowed}"
+                )
         else:
             if strategy_name == 'extreme_price':
                 params = {
@@ -92,11 +99,9 @@ async def run_strategy(
                 strategy = ArbitrageStrategy(**params)
             else:
                 raise ValueError(f"Unknown strategy: {strategy_name}")
-        
-        tasks.append(asyncio.create_task(strategy.start()))
+        strategies.append(strategy)
     
-    # Run all strategy instances concurrently
-    await asyncio.gather(*tasks)
+    return strategies
 
 
 def parse_args() -> argparse.Namespace:
@@ -130,7 +135,7 @@ async def main_async():
                 raise ValueError("--strategy-args must be a JSON object")
         except Exception as e:
             raise SystemExit(f"Failed to parse --strategy-args: {e}")
-    await run_strategy(
+    strategies = run_strategy(
         args.strategy,
         env_paths,
         strategy_path=getattr(args, 'strategy_path', None),
@@ -138,6 +143,21 @@ async def main_async():
         log_level=args.log_level,
         dry_run=args.dry_run,
     )
+
+    tasks = [asyncio.create_task(s.start()) for s in strategies]
+
+    try:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                logging.error(f"🚨 One of the strategies crashed: {res}")
+    except KeyboardInterrupt:
+        print('\n👋 Stopping all strategies...')
+        for s in strategies:
+            s.stop()
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 if __name__ == '__main__':

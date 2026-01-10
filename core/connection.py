@@ -21,6 +21,19 @@ load_dotenv(env_path)
 logger = logging.getLogger(__name__)
 
 
+class DummyClient:
+    """Minimal stub client for dry-run mode."""
+
+    def get_address(self) -> str:
+        return "0xDRYRUN"
+
+    def get_balance_allowance(self) -> Dict[str, Any]:
+        return {'balance': 0}
+
+    def get_order_book(self, token_id: str) -> Dict[str, Any]:
+        return {'bids': [], 'asks': []}
+
+
 class PolymarketConnection:
     """
     מנהל חיבור ל-Polymarket.
@@ -41,7 +54,8 @@ class PolymarketConnection:
         private_key: Optional[str] = None,
         funder_address: Optional[str] = None,
         clob_url: Optional[str] = None,
-        chain_id: Optional[int] = None
+        chain_id: Optional[int] = None,
+        dry_run: bool = False,
     ):
         """אתחול חיבור עם מפתחות מוזרמים או fallback לסביבה"""
         self._provided = {
@@ -53,6 +67,7 @@ class PolymarketConnection:
             'CLOB_URL': clob_url,
             'CHAIN_ID': chain_id,
         }
+        self.dry_run = dry_run
         self._validate_env_vars()
         self._init_client()
         
@@ -66,6 +81,10 @@ class PolymarketConnection:
 
     def _validate_env_vars(self):
         """בדיקה שכל המפתחות הנדרשים קיימים לשימוש בלקוח"""
+        if self.dry_run:
+            # Skip strict validation in dry-run
+            return
+
         # אם אין FUNDER_ADDRESS, נתמוך בארנק EOA (signature_type=0)
         # עבור Proxy נדרשים כל המפתחות כולל FUNDER_ADDRESS
         api_key = self._get_or_env('API_KEY', 'POLYMARKET_API_KEY')
@@ -93,6 +112,13 @@ class PolymarketConnection:
     def _init_client(self):
         """אתחול CLOB client"""
         try:
+            if self.dry_run:
+                self.client = DummyClient()
+                self._balance_cache = 0.0
+                self._balance_is_real = False
+                logger.info("✅ Initialized Polymarket connection in DRY-RUN mode (no credentials required)")
+                return
+
             # Resolve credentials (prefer injected)
             api_key = self._get_or_env('API_KEY', 'POLYMARKET_API_KEY', '')
             api_secret = self._get_or_env('API_SECRET', 'POLYMARKET_API_SECRET', '')
@@ -148,6 +174,9 @@ class PolymarketConnection:
         Returns:
             יתרה ב-USDC
         """
+        if self.dry_run:
+            return 0.0
+
         if self._balance_cache is not None and not force_refresh:
             return self._balance_cache
         
