@@ -73,43 +73,48 @@ class ArbitrageStrategy(BaseStrategy):
                 except:
                     continue
             
-            # Look for price discrepancies
-            # This is a simplified example - real arbitrage is more complex
+            # Look for price discrepancies using REAL orderbook prices
             for i in range(len(markets) - 1):
                 market1 = markets[i]
                 market2 = markets[i + 1]
                 
-                # Get prices
-                prices1 = self._get_prices(market1)
-                prices2 = self._get_prices(market2)
+                token_ids1 = self._get_token_ids(market1)
+                token_ids2 = self._get_token_ids(market2)
                 
-                if not prices1 or not prices2:
+                if not token_ids1 or not token_ids2:
                     continue
                 
-                # Check for arbitrage opportunity
-                # Example: Buy YES in market1, Sell YES in market2
-                buy_price = prices1.get('YES', 0)
-                sell_price = prices2.get('YES', 0)
-                
-                if buy_price > 0 and sell_price > buy_price:
-                    profit_pct = ((sell_price / buy_price) - 1) * 100
+                # Get REAL prices from orderbook (not mid-prices)
+                try:
+                    # For buying: we pay the ASK price
+                    book1 = self.executor.client.get_order_book(token_ids1[0])
+                    asks1 = book1.get('asks', [])
+                    buy_price = float(asks1[0].get('price', 0)) if asks1 else 0
                     
-                    if profit_pct >= self.min_profit_pct:
-                        token_ids1 = self._get_token_ids(market1)
-                        token_ids2 = self._get_token_ids(market2)
+                    # For selling: we receive the BID price
+                    book2 = self.executor.client.get_order_book(token_ids2[0])
+                    bids2 = book2.get('bids', [])
+                    sell_price = float(bids2[0].get('price', 0)) if bids2 else 0
+                    
+                    # Calculate REAL profit after spread
+                    if buy_price > 0 and sell_price > buy_price:
+                        profit_pct = ((sell_price / buy_price) - 1) * 100
                         
-                        if token_ids1 and token_ids2:
+                        if profit_pct >= self.min_profit_pct:
                             opportunities.append({
                                 'event_title': event.get('title', ''),
                                 'market1_question': market1.get('question', ''),
                                 'market2_question': market2.get('question', ''),
                                 'buy_token': token_ids1[0],
                                 'sell_token': token_ids2[0],
-                                'buy_price': buy_price,
-                                'sell_price': sell_price,
+                                'buy_price': buy_price,  # Real ASK
+                                'sell_price': sell_price,  # Real BID
                                 'profit_pct': profit_pct,
                                 'token_id': token_ids1[0]  # For tracking
                             })
+                except Exception as e:
+                    logger.debug(f"Failed to get orderbook prices: {e}")
+                    continue
         
         return opportunities
     

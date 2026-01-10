@@ -62,14 +62,20 @@ class PolymarketConnection:
                 api_passphrase=os.getenv("POLYMARKET_API_PASSPHRASE").strip()
             )
             
-            # Initialize CLOB client with Proxy signature (for email/Google accounts)
+            # Determine signature type dynamically:
+            # If FUNDER exists, it's a Proxy wallet (email/Google) = signature_type 1
+            # Otherwise, it's a regular EOA wallet (MetaMask) = signature_type 0
+            funder_address = os.getenv("POLYMARKET_FUNDER_ADDRESS")
+            sig_type = 1 if funder_address else 0
+            
+            # Initialize CLOB client
             self.client = ClobClient(
                 host=os.getenv("CLOB_URL", "https://clob.polymarket.com"),
                 key=os.getenv("POLYMARKET_PRIVATE_KEY"),
                 chain_id=int(os.getenv("CHAIN_ID", "137")),
                 creds=creds,
-                signature_type=1,  # POLY_PROXY for email wallets
-                funder=os.getenv("POLYMARKET_FUNDER_ADDRESS")
+                signature_type=sig_type,
+                funder=funder_address if sig_type == 1 else None
             )
             
             self.client.set_api_creds(creds)
@@ -78,9 +84,11 @@ class PolymarketConnection:
             self._balance_cache: Optional[float] = None
             self._balance_is_real = False
             
-            logger.info(f"✅ Connected to Polymarket")
+            wallet_type = "Proxy (Email/Google)" if sig_type == 1 else "EOA (MetaMask)"
+            logger.info(f"✅ Connected to Polymarket ({wallet_type})")
             logger.info(f"   Signer: {self.client.get_address()}")
-            logger.info(f"   Funder: {os.getenv('POLYMARKET_FUNDER_ADDRESS')}")
+            if sig_type == 1:
+                logger.info(f"   Funder: {funder_address}")
             
         except Exception as e:
             logger.error(f"Failed to initialize Polymarket connection: {e}")

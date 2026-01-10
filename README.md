@@ -66,10 +66,14 @@ python -m strategies.example_bot.run
 ## 🛠️ Core Modules
 
 ### Connection
+התומך באופן אוטומטי בשני סוגי ארנקים:
+- **Proxy Wallets** (Email/Google) - עם FUNDER_ADDRESS
+- **EOA Wallets** (MetaMask) - ללא FUNDER_ADDRESS
+
 ```python
 from core.connection import PolymarketConnection
 
-conn = PolymarketConnection()
+conn = PolymarketConnection()  # זיהוי אוטומטי של סוג הארנק
 markets = conn.get_markets()
 ```
 
@@ -82,11 +86,20 @@ opportunities = scanner.scan_for_opportunities(filters={...})
 ```
 
 ### Executor
+מטפל ב-Partial Fills ומעקב אחר גודל פוזיציות אמיתי:
+
 ```python
 from core.executor import TradeExecutor
 
 executor = TradeExecutor()
 result = executor.execute_trade(token_id, side, size, price)
+
+# בודק אם היה partial fill
+if result:
+    filled = result.get('sizeFilled', 0)
+    requested = result.get('size', 0)
+    if filled < requested:
+        print(f"⚠️ Partial fill: {filled}/{requested}")
 ```
 
 ## 🎯 אסטרטגיות מובנות

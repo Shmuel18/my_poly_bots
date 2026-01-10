@@ -89,13 +89,21 @@ class TradeExecutor:
             
             if response and response.get('success'):
                 order_id = response.get('orderID', 'unknown')
-                logger.info(f"✅ Order executed: {order_id}")
                 
-                # Track position
-                if side.upper() == 'BUY':
+                # Check actual filled size (could be partial fill)
+                filled_size = float(response.get('sizeFilled', size))
+                
+                if filled_size < size:
+                    logger.warning(f"⚠️ Partial fill: {filled_size}/{size} units")
+                else:
+                    logger.info(f"✅ Order executed: {order_id}")
+                
+                # Track position with ACTUAL filled size
+                if side.upper() == 'BUY' and filled_size > 0:
                     self.open_positions[token_id] = {
                         'entry_price': price,
-                        'size': size,
+                        'size': filled_size,  # Use actual filled size
+                        'requested_size': size,  # Keep original for reference
                         'order_id': order_id
                     }
                 
