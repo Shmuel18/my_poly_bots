@@ -90,7 +90,7 @@ python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --en
 
 ### מצב הדמיה (Dry-Run)
 
-להריץ הכל בלי לשלוח הזמנות אמיתיות:
+להריץ הכל בלי לשלוח הזמנות אמיתיות (עם נתוני שוק אמיתיים):
 
 ```bash
 python main.py --strategy extreme_price --env config/.env --dry-run
@@ -99,7 +99,7 @@ python main.py --strategy extreme_price --env config/.env --dry-run
 python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --env config/.env --strategy-args "{\"threshold\": 0.4}" --dry-run
 ```
 
-הדגשה: ב-Dry-Run לא נשלחות הזמנות, הלוגים מסומנים כ-[DRY-RUN], והכנסות/יציאות מחושבות סימולטיבית בלבד. ניתן להריץ גם ללא מפתחות (Guest Mode) – החיבור יאותחל עם לקוח דמה לצרכי סימולציה בלבד.
+הדגשה: ב-Dry-Run לא נשלחות הזמנות, הלוגים מסומנים כ-[DRY-RUN], והכנסות/יציאות מחושבות סימולטיבית בלבד. החיבור משתמש בלקוח דמה שקורא Orderbook אמיתי (ציבורי) ולכן אפשר להריץ ללא מפתחות (Guest Mode) ולקבל סיגנלים על הזדמנויות אמיתיות.
 
 טיפ: בהפעלת מספר חשבונות במקביל, שם ה-logger כולל קיצור כתובת הארנק כדי להבדיל בין התהליכים (למשל `ArbitrageStrategy_0x1234`).
 

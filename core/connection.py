@@ -8,6 +8,7 @@ import os
 import logging
 from typing import Optional, Dict, Any
 from pathlib import Path
+import requests
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import ApiCreds
@@ -22,16 +23,28 @@ logger = logging.getLogger(__name__)
 
 
 class DummyClient:
-    """Minimal stub client for dry-run mode."""
+    """Read-only client for dry-run mode with real public orderbook data."""
+
+    def __init__(self, host: str = "https://clob.polymarket.com"):
+        self.host = host.rstrip("/")
 
     def get_address(self) -> str:
-        return "0xDRYRUN"
+        return "0xSIMULATION_WALLET"
 
     def get_balance_allowance(self) -> Dict[str, Any]:
-        return {'balance': 0}
+        # Provide a generous virtual balance to avoid blocking simulated trades
+        return {'balance': '100000'}
 
     def get_order_book(self, token_id: str) -> Dict[str, Any]:
-        return {'bids': [], 'asks': []}
+        try:
+            url = f"{self.host}/book"
+            resp = requests.get(url, params={"token_id": token_id}, timeout=5)
+            if resp.status_code == 200:
+                return resp.json()
+            return {'bids': [], 'asks': []}
+        except Exception as e:
+            logging.warning(f"DummyClient failed to fetch book for {token_id}: {e}")
+            return {'bids': [], 'asks': []}
 
 
 class PolymarketConnection:
@@ -113,7 +126,8 @@ class PolymarketConnection:
         """אתחול CLOB client"""
         try:
             if self.dry_run:
-                self.client = DummyClient()
+                clob_url = self._get_or_env('CLOB_URL', 'CLOB_URL', 'https://clob.polymarket.com')
+                self.client = DummyClient(host=clob_url)
                 self._balance_cache = 0.0
                 self._balance_is_real = False
                 logger.info("✅ Initialized Polymarket connection in DRY-RUN mode (no credentials required)")

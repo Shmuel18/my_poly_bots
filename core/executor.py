@@ -41,7 +41,8 @@ class TradeExecutor:
     async def get_balance(self) -> float:
         """מחזיר את יתרת USDC"""
         if self.dry_run:
-            return 0.0
+            # Provide a virtual balance for sizing in dry-run mode
+            return 100000.0
         return await self.connection.get_balance()
     
     def execute_trade(
