@@ -39,7 +39,14 @@ def load_connection_from_env(env_path: Optional[str]) -> PolymarketConnection:
     )
 
 
-async def run_strategy(strategy_name: Optional[str], env_paths: List[str], strategy_path: Optional[str] = None, strategy_kwargs: Optional[dict] = None, log_level: str = 'INFO') -> None:
+async def run_strategy(
+    strategy_name: Optional[str],
+    env_paths: List[str],
+    strategy_path: Optional[str] = None,
+    strategy_kwargs: Optional[dict] = None,
+    log_level: str = 'INFO',
+    dry_run: bool = False,
+) -> None:
     """Instantiate and run the selected strategy for each env file."""
     tasks = []
     
@@ -48,13 +55,18 @@ async def run_strategy(strategy_name: Optional[str], env_paths: List[str], strat
         StrategyClass = load_class(strategy_path, default_class_name="Strategy")
     
     strategy_kwargs = strategy_kwargs or {}
+    if dry_run:
+        strategy_kwargs.setdefault('dry_run', True)
     
     for idx, env_path in enumerate(env_paths or [None]):
         connection = load_connection_from_env(env_path)
         
         if StrategyClass is not None:
             # For dynamically loaded strategies, assume constructor accepts at least `connection` and optional `log_level`.
-            strategy = StrategyClass(connection=connection, log_level=log_level, **strategy_kwargs)
+            try:
+                strategy = StrategyClass(connection=connection, log_level=log_level, **strategy_kwargs)
+            except TypeError as e:
+                raise SystemExit(f"Failed to initialize strategy from {strategy_path}: {e}")
         else:
             if strategy_name == 'extreme_price':
                 params = {
@@ -99,6 +111,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument('--log-level', default='INFO', help='Logging level')
     parser.add_argument('--strategy-args', default=None,
                         help='JSON string of extra constructor kwargs for the selected strategy (dynamic or built-in). Example: "{\"min_profit_pct\": 3.0, \"scan_interval\": 120}"')
+    parser.add_argument('--dry-run', action='store_true',
+                        help='Simulate trades without posting orders (passes dry_run=True into strategy/executor)')
     return parser.parse_args()
 
 
@@ -116,7 +130,14 @@ async def main_async():
                 raise ValueError("--strategy-args must be a JSON object")
         except Exception as e:
             raise SystemExit(f"Failed to parse --strategy-args: {e}")
-    await run_strategy(args.strategy, env_paths, strategy_path=getattr(args, 'strategy_path', None), strategy_kwargs=strategy_kwargs, log_level=args.log_level)
+    await run_strategy(
+        args.strategy,
+        env_paths,
+        strategy_path=getattr(args, 'strategy_path', None),
+        strategy_kwargs=strategy_kwargs,
+        log_level=args.log_level,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == '__main__':

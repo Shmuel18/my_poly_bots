@@ -29,7 +29,8 @@ class BaseStrategy(ABC):
         strategy_name: str = "BaseStrategy",
         scan_interval: int = 300,
         log_level: str = "INFO",
-        connection: Optional[PolymarketConnection] = None
+        connection: Optional[PolymarketConnection] = None,
+        dry_run: bool = False,
     ):
         """
         אתחול אסטרטגיה.
@@ -41,6 +42,7 @@ class BaseStrategy(ABC):
         """
         self.strategy_name = strategy_name
         self.scan_interval = scan_interval
+        self.dry_run = dry_run
         
         # Setup logging
         setup_logging(log_level=log_level)
@@ -49,9 +51,10 @@ class BaseStrategy(ABC):
         self.connection = connection if connection is not None else PolymarketConnection()
         wallet_short = (self.connection.get_address() or '')[:6]
         self.logger = logging.getLogger(f"{strategy_name}_{wallet_short}")
-        self.logger.info(f"🤖 Initializing {strategy_name} ({wallet_short})")
+        mode = "DRY-RUN" if self.dry_run else "LIVE"
+        self.logger.info(f"🤖 Initializing {strategy_name} ({wallet_short}) - {mode}")
         self.scanner = MarketScanner()
-        self.executor = TradeExecutor(self.connection)
+        self.executor = TradeExecutor(self.connection, dry_run=self.dry_run)
         self.ws_manager = WebSocketManager()
         
         # State

@@ -26,7 +26,7 @@ class TradeExecutor:
         )
     """
     
-    def __init__(self, connection):
+    def __init__(self, connection, dry_run: bool = False):
         """
         אתחול Executor.
         
@@ -36,9 +36,12 @@ class TradeExecutor:
         self.connection = connection
         self.client = connection.get_client()
         self.open_positions: Dict[str, Dict[str, Any]] = {}
+        self.dry_run = dry_run
         
     async def get_balance(self) -> float:
         """מחזיר את יתרת USDC"""
+        if self.dry_run:
+            return 0.0
         return await self.connection.get_balance()
     
     def execute_trade(
@@ -63,6 +66,19 @@ class TradeExecutor:
             תוצאת העסקה או None אם נכשל
         """
         try:
+            if self.dry_run:
+                logger.info(f"[DRY-RUN] {side} {size} @ ${price:.4f} on {token_id}")
+                return {
+                    'success': True,
+                    'dry_run': True,
+                    'orderID': 'dry-run',
+                    'token_id': token_id,
+                    'size': size,
+                    'sizeFilled': size,
+                    'price': price,
+                    'side': side.upper(),
+                }
+            
             # Create order
             order_args = OrderArgs(
                 token_id=token_id,
@@ -135,6 +151,15 @@ class TradeExecutor:
             מידע על נזילות
         """
         try:
+            if self.dry_run:
+                return {
+                    'available': True,
+                    'available_size': size,
+                    'best_price': None,
+                    'size_ratio': 1.0,
+                    'dry_run': True,
+                }
+            
             # Get orderbook
             book = self.client.get_order_book(token_id)
             
@@ -189,16 +214,36 @@ class TradeExecutor:
         
         # Get current price if not provided
         if price is None:
-            try:
-                book = self.client.get_order_book(token_id)
-                bids = book.get('bids', [])
-                price = float(bids[0].get('price', 0)) if bids else None
-            except:
-                logger.error("Could not get market price")
-                return None
+            if self.dry_run:
+                price = position['entry_price']
+            else:
+                try:
+                    book = self.client.get_order_book(token_id)
+                    bids = book.get('bids', [])
+                    price = float(bids[0].get('price', 0)) if bids else None
+                except:
+                    logger.error("Could not get market price")
+                    return None
         
         if not price:
             return None
+        
+        if self.dry_run:
+            size = position['size']
+            entry_price = position['entry_price']
+            pnl = (price - entry_price) * size
+            pnl_pct = ((price / entry_price) - 1) * 100 if entry_price > 0 else 0
+            logger.info(f"[DRY-RUN] Close position: {size} @ ${price:.4f} | P&L ${pnl:.2f} ({pnl_pct:+.1f}%)")
+            del self.open_positions[token_id]
+            return {
+                'success': True,
+                'dry_run': True,
+                'pnl': pnl,
+                'pnl_pct': pnl_pct,
+                'token_id': token_id,
+                'size': size,
+                'price': price,
+            }
         
         # Execute sell order
         result = self.execute_trade(
@@ -234,6 +279,8 @@ class TradeExecutor:
     
     async def check_and_settle_positions(self) -> None:
         """בודק ומסדר פוזיציות בשווקים סגורים"""
+        if self.dry_run:
+            return
         for token_id in list(self.open_positions.keys()):
             try:
                 # Try to get balance for this token

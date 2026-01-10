@@ -59,15 +59,13 @@ python main.py --strategy extreme_price --env config/.env
 ```
 
 הרצה במקביל עם מספר חשבונות (כל חשבון בקובץ `.env` נפרד):
-
 ```bash
 python main.py --strategy arbitrage --env config/account1.env --env config/account2.env
+```
 
 ### טעינה דינמית של אסטרטגיות
 
 ניתן לטעון מחלקת אסטרטגיה ממסלול דוטד (Module) או מקובץ פייתון ישירות.
-
-דוגמאות:
 
 ```bash
 # טעינה דינמית ממסלול דוטד (כולל שם המחלקה)
@@ -90,8 +88,20 @@ python main.py --strategy arbitrage --env config/.env --strategy-args "{\"min_pr
 python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --env config/.env --strategy-args "{\"threshold\": 0.5, \"max_positions\": 5}"
 ```
 
-טיפ: בהפעלת מספר חשבונות במקביל, שם ה-logger כולל קיצור כתובת הארנק כדי להבדיל בין התהליכים (למשל `ArbitrageStrategy_0x1234`).
+### מצב הדמיה (Dry-Run)
+
+להריץ הכל בלי לשלוח הזמנות אמיתיות:
+
+```bash
+python main.py --strategy extreme_price --env config/.env --dry-run
+
+# או עם אסטרטגיה דינמית ו-parms מותאמים
+python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --env config/.env --strategy-args "{\"threshold\": 0.4}" --dry-run
 ```
+
+הדגשה: ב-Dry-Run לא נשלחות הזמנות, הלוגים מסומנים כ-[DRY-RUN], והכנסות/יציאות מחושבות סימולטיבית בלבד.
+
+טיפ: בהפעלת מספר חשבונות במקביל, שם ה-logger כולל קיצור כתובת הארנק כדי להבדיל בין התהליכים (למשל `ArbitrageStrategy_0x1234`).
 
 ## 📚 איך לבנות בוט חדש
 
@@ -120,7 +130,7 @@ conn = PolymarketConnection(  # הזרמת מפתחות מאפשרת ריבוי 
     funder_address="...",     # לא חובה ב-EOA
 )
 markets = conn.get_markets()
-```
+````
 
 ### Scanner
 
