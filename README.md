@@ -62,6 +62,25 @@ python main.py --strategy extreme_price --env config/.env
 
 ```bash
 python main.py --strategy arbitrage --env config/account1.env --env config/account2.env
+
+### טעינה דינמית של אסטרטגיות
+
+ניתן לטעון מחלקת אסטרטגיה ממסלול דוטד (Module) או מקובץ פייתון ישירות.
+
+דוגמאות:
+
+```bash
+# טעינה דינמית ממסלול דוטד (כולל שם המחלקה)
+python main.py --strategy-path strategies.arbitrage.strategy:ArbitrageStrategy --env config/.env
+
+# טעינה דינמית מקובץ (יחסי/מוחלט) עם שם המחלקה
+python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --env config/.env
+
+# אם לא מציינים שם מחלקה, ייטען בשם ברירת המחדל "Strategy"
+python main.py --strategy-path strategies/my_strategy.py --env config/.env
+```
+
+הקונסטרקטור של אסטרטגיה דינמית צפוי לפחות לקבל `connection` ו-`log_level`. אם יש פרמטרים נוספים, ניתן להגדיר ערכי ברירת מחדל בתוך המחלקה עצמה.
 ```
 
 ## 📚 איך לבנות בוט חדש
