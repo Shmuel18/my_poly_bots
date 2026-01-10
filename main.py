@@ -41,7 +41,7 @@ def load_connection_from_env(env_path: Optional[str], dry_run: bool = False) -> 
     )
 
 
-async def run_strategy(
+def run_strategy(
     strategy_name: Optional[str],
     env_paths: List[str],
     strategy_path: Optional[str] = None,

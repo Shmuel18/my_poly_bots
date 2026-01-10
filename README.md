@@ -59,6 +59,7 @@ python main.py --strategy extreme_price --env config/.env
 ```
 
 הרצה במקביל עם מספר חשבונות (כל חשבון בקובץ `.env` נפרד):
+
 ```bash
 python main.py --strategy arbitrage --env config/account1.env --env config/account2.env
 ```
@@ -130,7 +131,7 @@ conn = PolymarketConnection(  # הזרמת מפתחות מאפשרת ריבוי 
     funder_address="...",     # לא חובה ב-EOA
 )
 markets = conn.get_markets()
-````
+```
 
 ### Scanner
 
