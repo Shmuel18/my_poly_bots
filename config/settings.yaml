@@ -1,0 +1,36 @@
+# Global Settings for Polymarket Bots
+
+# Logging Configuration
+logging:
+  level: INFO
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+  file: "logs/bot.log"
+  max_file_size: 5242880  # 5MB
+  backup_count: 3
+
+# API Configuration
+api:
+  timeout: 30
+  max_retries: 3
+  retry_delay: 2
+  rate_limit_delay: 1
+
+# WebSocket Configuration
+websocket:
+  ping_interval: 20
+  ping_timeout: 20
+  reconnect_delay: 5
+  max_reconnect_attempts: 10
+
+# Trading Defaults
+trading:
+  max_position_size: 100.0
+  min_position_size: 1.0
+  default_slippage: 0.01
+  order_timeout: 30
+
+# Market Scanning
+scanning:
+  scan_interval: 300  # 5 minutes
+  price_check_interval: 30  # 30 seconds
+  max_markets_to_scan: 5000
