@@ -5,6 +5,7 @@ WebSocket Manager Module
 """
 import asyncio
 import logging
+import time
 import websockets
 from typing import Optional, List, Dict, Callable, Set
 import json
@@ -28,7 +29,9 @@ class WebSocketManager:
     def __init__(
         self,
         ping_interval: int = 20,
-        ping_timeout: int = 20
+        ping_timeout: int = 20,
+        auto_reconnect: bool = True,
+        max_reconnect_delay: int = 60
     ):
         """
         אתחול WebSocket Manager.
@@ -36,12 +39,19 @@ class WebSocketManager:
         Args:
             ping_interval: מרווח ping בשניות
             ping_timeout: timeout ל-ping
+            auto_reconnect: האם להתחבר מחדש אוטומטית
+            max_reconnect_delay: המתנה מקסימלית בין ניסיונות
         """
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
         self.subscribed_tokens: Set[str] = set()
         self.is_connected = False
+        self.auto_reconnect = auto_reconnect
+        self.max_reconnect_delay = max_reconnect_delay
+        self.last_message_time = 0
+        self._running = False
+        self._reconnect_task: Optional[asyncio.Task] = None
         
     async def connect(self, max_retries: int = 3) -> bool:
         """
@@ -162,6 +172,9 @@ class WebSocketManager:
                         timeout=timeout
                     )
                     
+                    # Update last message timestamp for health monitoring
+                    self.last_message_time = time.time()
+                    
                     message_count += 1
                     
                     # Parse message
@@ -229,3 +242,71 @@ class WebSocketManager:
             return True
         
         return False
+    
+    def is_healthy(self, max_silence: int = 60) -> bool:
+        """
+        בודק אם החיבור "בריא" (קיבל הודעות לאחרונה).
+        
+        Args:
+            max_silence: זמן מקסימלי ללא הודעות (שניות)
+            
+        Returns:
+            True אם החיבור נראה פעיל
+        """
+        if not self.is_connected or not self.ws:
+            return False
+        
+        if self.last_message_time == 0:
+            return True  # Just connected, give it time
+        
+        silence_duration = time.time() - self.last_message_time
+        return silence_duration < max_silence
+    
+    async def start_reconnect_loop(self) -> None:
+        """
+        לולאה שרצה ברקע ומתחברת מחדש במקרה של ניתוק.
+        """
+        if not self.auto_reconnect:
+            return
+        
+        self._running = True
+        reconnect_delay = 1
+        
+        while self._running:
+            try:
+                # Check connection health
+                if not self.is_healthy(max_silence=90):
+                    logger.warning("⚠️ WebSocket unhealthy, attempting reconnect...")
+                    if await self.reconnect():
+                        reconnect_delay = 1  # Reset delay on success
+                    else:
+                        reconnect_delay = min(reconnect_delay * 2, self.max_reconnect_delay)
+                        logger.error(f"Reconnect failed, waiting {reconnect_delay}s...")
+                        await asyncio.sleep(reconnect_delay)
+                else:
+                    # Connection healthy, check again in 30s
+                    await asyncio.sleep(30)
+            
+            except asyncio.CancelledError:
+                logger.info("Reconnect loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in reconnect loop: {e}")
+                await asyncio.sleep(10)
+        
+        self._running = False
+    
+    async def stop(self) -> None:
+        """
+        עוצר את לולאת ה-reconnect וסוגר את החיבור.
+        """
+        self._running = False
+        
+        if self._reconnect_task and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except asyncio.CancelledError:
+                pass
+        
+        await self.close()

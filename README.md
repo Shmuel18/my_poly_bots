@@ -133,6 +133,30 @@ conn = PolymarketConnection(  # הזרמת מפתחות מאפשרת ריבוי 
 markets = conn.get_markets()
 ```
 
+### WebSocket Manager
+
+חיבור WebSocket לעדכוני מחירים בזמן אמת עם:
+- **Auto-Reconnection** - התחברות מחדש אוטומטית בניתוק
+- **Health Monitoring** - בדיקה שהחיבור פעיל
+- **Batch Subscriptions** - הרשמה לאלפי שווקים בבאצ'ים
+
+```python
+from core.ws_manager import WebSocketManager
+
+ws = WebSocketManager(auto_reconnect=True)
+await ws.connect()
+await ws.subscribe_batch(token_ids, batch_size=100)
+
+# Start reconnect loop in background
+asyncio.create_task(ws.start_reconnect_loop())
+
+# Listen to price updates
+async def price_handler(token_id, price):
+    print(f"{token_id}: ${price}")
+
+await ws.receive_data(callback=price_handler)
+```
+
 ### Scanner
 
 ```python
@@ -144,7 +168,7 @@ opportunities = scanner.scan_for_opportunities(filters={...})
 
 ### Executor
 
-מטפל ב-Partial Fills ומעקב אחר גודל פוזיציות אמיתי:
+מטפל ב-Partial Fills, Rate Limiting ומעקב אחר גודל פוזיציות אמיתי:
 
 ```python
 from core.executor import TradeExecutor
@@ -158,6 +182,22 @@ if result:
     requested = result.get('size', 0)
     if filled < requested:
         print(f"⚠️ Partial fill: {filled}/{requested}")
+```
+
+### Rate Limiter
+
+מונע חסימות API ושגיאות 429:
+
+```python
+from utils.rate_limiter import POLYMARKET_RATE_LIMITER
+
+async with POLYMARKET_RATE_LIMITER:
+    # API call is automatically rate-limited
+    response = client.post_order(...)
+
+# Get stats
+stats = POLYMARKET_RATE_LIMITER.get_stats()
+print(f"Capacity: {stats[0]['capacity_pct']:.1f}%")
 ```
 
 ## 🎯 אסטרטגיות מובנות

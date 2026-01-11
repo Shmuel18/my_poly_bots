@@ -8,6 +8,7 @@ import logging
 from typing import Optional, Dict, Any
 from py_clob_client.clob_types import OrderArgs, OrderType
 from py_clob_client.order_builder.constants import BUY, SELL
+from utils.rate_limiter import POLYMARKET_RATE_LIMITER
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ class TradeExecutor:
             # Sign order with Proxy signature
             signed_order = self.client.create_order(order_args)
             
-            # Submit order
+            # Submit order with rate limiting
             logger.info(f"🚀 Posting order...")
             
             order_type_enum = OrderType.GTC
@@ -102,7 +103,8 @@ class TradeExecutor:
             elif order_type.upper() == 'IOC':
                 order_type_enum = OrderType.IOC
             
-            response = self.client.post_order(signed_order, order_type_enum)
+            async with POLYMARKET_RATE_LIMITER:
+                response = self.client.post_order(signed_order, order_type_enum)
             
             if response and response.get('success'):
                 order_id = response.get('orderID', 'unknown')
