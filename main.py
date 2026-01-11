@@ -61,6 +61,9 @@ def run_strategy(
         elif strategy_name == 'arbitrage':
             from strategies.arbitrage import ArbitrageStrategy as _BuiltIn
             StrategyClass = _BuiltIn
+        elif strategy_name == 'spread_arbitrage':
+            from strategies.spread_arbitrage import SpreadArbitrageStrategy as _BuiltIn
+            StrategyClass = _BuiltIn
     
     strategy_kwargs = strategy_kwargs or {}
     if dry_run:
@@ -113,7 +116,7 @@ def run_strategy(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description='Polymarket Bots Runner')
     group = parser.add_mutually_exclusive_group()
-    group.add_argument('--strategy', choices=['extreme_price', 'arbitrage'],
+    group.add_argument('--strategy', choices=['extreme_price', 'arbitrage', 'spread_arbitrage'],
                        help='Built-in strategy to run')
     group.add_argument('--strategy-path',
                        help='Dotted module or file path to strategy class. Examples: strategies.arbitrage.strategy:ArbitrageStrategy or strategies/custom.py:CustomStrategy')
