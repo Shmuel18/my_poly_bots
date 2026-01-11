@@ -295,3 +295,34 @@ class MarketScanner:
         
         logger.info(f"🔎 Found {len(matching)} markets matching keywords: {keywords}")
         return matching
+    
+    def filter_by_volume(
+        self,
+        markets: List[Dict],
+        min_volume: float = 100.0
+    ) -> List[Dict]:
+        """
+        סינון שווקים לפי נפח מסחר ב-24 השעות האחרונות.
+        
+        Args:
+            markets: רשימת שווקים
+            min_volume: נפח מינימלי בדולרים ($100)
+            
+        Returns:
+            שווקים עם נפח מספיק
+        """
+        filtered = []
+        for market in markets:
+            try:
+                # Extract volume from market data
+                # Polymarket API may include volume info in different formats
+                volume_24h = float(market.get('volume24h', 0) or 0)
+                if volume_24h < min_volume:
+                    continue
+                
+                filtered.append(market)
+            except (ValueError, TypeError):
+                continue
+        
+        logger.debug(f"📊 Filtered to {len(filtered)} markets with volume >= ${min_volume}")
+        return filtered
