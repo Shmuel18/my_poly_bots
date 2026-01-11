@@ -197,7 +197,8 @@ class TradeExecutor:
     async def close_position(
         self,
         token_id: str,
-        price: Optional[float] = None
+        price: Optional[float] = None,
+        position_data: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict]:
         """
         סוגר פוזיציה פתוחה.
@@ -205,6 +206,7 @@ class TradeExecutor:
         Args:
             token_id: מזהה טוקן
             price: מחיר ליחידה (אם None, משתמש במחיר שוק)
+            position_data: מידע על הפוזיציה מהאסטרטגיה (fallback אם executor לא מוצא)
             
         Returns:
             תוצאת העסקה
@@ -212,9 +214,14 @@ class TradeExecutor:
         position = self.open_positions.get(token_id)
         
         if not position:
-            logger.warning(f"⚠️ No open position for {token_id[:12]}...")
-            logger.debug(f"Open positions: {list(self.open_positions.keys())}")
-            return None
+            # Fallback to position_data provided by strategy
+            if position_data:
+                logger.info(f"ℹ️ Using position data from strategy for {token_id[:12]}...")
+                position = position_data
+            else:
+                logger.warning(f"⚠️ No open position for {token_id[:12]}...")
+                logger.debug(f"Open positions in executor: {list(self.open_positions.keys())}")
+                return None
         
         # Get current price if not provided
         if price is None:

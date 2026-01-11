@@ -207,7 +207,8 @@ class BaseStrategy(ABC):
         
         self.logger.info(f"🚪 Exiting position: {position.get('question', '')[:50]}")
         
-        result = await self.executor.close_position(token_id, exit_price)
+        # Pass position data to executor as fallback
+        result = await self.executor.close_position(token_id, exit_price, position_data=position)
         
         if result and result.get('success'):
             pnl = result.get('pnl', 0)
