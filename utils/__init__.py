@@ -8,6 +8,7 @@ from .helpers import (
     extract_token_ids,
     parse_outcome_prices
 )
+from .position_manager import PositionManager
 
 __all__ = [
     'setup_logging',
@@ -17,5 +18,6 @@ __all__ = [
     'hours_until_close',
     'format_market_info',
     'extract_token_ids',
-    'parse_outcome_prices'
+    'parse_outcome_prices',
+    'PositionManager'
 ]

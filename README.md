@@ -104,6 +104,28 @@ python main.py --strategy-path strategies/custom_strategy.py:CustomStrategy --en
 
 טיפ: בהפעלת מספר חשבונות במקביל, שם ה-logger כולל קיצור כתובת הארנק כדי להבדיל בין התהליכים (למשל `ArbitrageStrategy_0x1234`).
 
+### מערכת Rotation לוגים
+
+ניהול אוטומטי של גודל קבצי הלוגים עם שני מצבים:
+
+```bash
+# Rotation לפי גודל (ברירת מחדל) - יוצר קובץ חדש כל 10MB
+python main.py --strategy extreme_price --env config/.env --log-rotation size
+
+# Rotation יומי - יוצר קובץ חדש כל יום בחצות
+python main.py --strategy arbitrage --env config/.env --log-rotation time
+```
+
+**מצב "size"**: כל קובץ לוג מוגבל ל-10MB. כשמתמלא, נוצר קובץ חדש ונשמרים עד 10 קבצים ישנים (כ-100MB סה"כ).
+
+**מצב "time"**: נוצר קובץ לוג חדש כל יום בחצות. נשמרים עד 10 ימים אחורה.
+
+קבצי הלוגים נמצאים בתיקייה `logs/` ומקבלים שמות כמו:
+
+- `bot_20241225.log` (לוג נוכחי)
+- `bot_20241225.log.1`, `bot_20241225.log.2` (גיבויים במצב size)
+- `bot_20241224.log`, `bot_20241223.log` (ימים קודמים במצב time)
+
 ## 📚 איך לבנות בוט חדש
 
 1. צור תיקייה חדשה ב-`strategies/`
@@ -136,6 +158,7 @@ markets = conn.get_markets()
 ### WebSocket Manager
 
 חיבור WebSocket לעדכוני מחירים בזמן אמת עם:
+
 - **Auto-Reconnection** - התחברות מחדש אוטומטית בניתוק
 - **Health Monitoring** - בדיקה שהחיבור פעיל
 - **Batch Subscriptions** - הרשמה לאלפי שווקים בבאצ'ים
@@ -199,6 +222,28 @@ async with POLYMARKET_RATE_LIMITER:
 stats = POLYMARKET_RATE_LIMITER.get_stats()
 print(f"Capacity: {stats[0]['capacity_pct']:.1f}%")
 ```
+
+### Position Manager
+
+שומר פוזיציות לדיסק ומונע אובדן נתונים:
+
+```python
+from utils.position_manager import PositionManager
+
+pm = PositionManager("data/positions.json")
+
+# הפוזיציות נשמרות אוטומטית
+pm.add_position(token_id, entry_price, size, metadata)
+
+# נטען אוטומטית בהפעלה מחדש
+positions = pm.get_all_positions()
+
+# סנכרון עם Executor
+if pm.has_position(token_id):
+    position = pm.get_position(token_id)
+```
+
+**הערה חשובה:** BaseStrategy משתמש ב-PositionManager אוטומטית. כל פוזיציה שנפתחת נשמרת לקובץ `data/positions_{wallet}.json` ונטענת בהפעלה מחדש.
 
 ## 🎯 אסטרטגיות מובנות
 

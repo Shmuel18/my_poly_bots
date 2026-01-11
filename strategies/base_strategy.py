@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Any
 
 from core import PolymarketConnection, MarketScanner, TradeExecutor, WebSocketManager
 from utils import setup_logging, calculate_pnl
+from utils.position_manager import PositionManager
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,14 @@ class BaseStrategy(ABC):
         self.scanner = MarketScanner()
         self.executor = TradeExecutor(self.connection, dry_run=self.dry_run)
         self.ws_manager = WebSocketManager()
+        
+        # Position manager for persistence
+        self.position_manager = PositionManager(f"data/positions_{wallet_short}.json")
+        
+        # Sync positions from PositionManager
+        self.open_positions = self.position_manager.get_positions_by_strategy(strategy_name)
+        if self.open_positions:
+            self.logger.info(f"📂 Restored {len(self.open_positions)} positions from disk")
         
         # State
         self.running = False
@@ -131,7 +140,7 @@ class BaseStrategy(ABC):
         self.logger.info(f"🎯 Entering position: {opportunity.get('question', '')[:50]}")
         self.logger.info(f"   {size} units @ ${price:.4f}")
         
-        result = self.executor.execute_trade(
+        result = await self.executor.execute_trade(
             token_id=token_id,
             side='BUY',
             size=size,
@@ -139,14 +148,29 @@ class BaseStrategy(ABC):
         )
         
         if result and result.get('success'):
-            self.open_positions[token_id] = {
+            # Get actual filled size from executor
+            executor_position = self.executor.get_position(token_id)
+            actual_size = executor_position.get('size', size) if executor_position else size
+            
+            position_data = {
                 **opportunity,
                 'entry_time': asyncio.get_event_loop().time(),
                 'entry_price': price,
-                'size': size
+                'size': actual_size,
+                'strategy_name': self.strategy_name
             }
+            
+            # Save to both memory and disk
+            self.open_positions[token_id] = position_data
+            self.position_manager.add_position(
+                token_id=token_id,
+                entry_price=price,
+                size=actual_size,
+                metadata=position_data
+            )
+            
             self.stats['trades_entered'] += 1
-            self.logger.info("✅ Position entered successfully")
+            self.logger.info(f"✅ Position entered successfully (size: {actual_size})")
             return True
         
         return False
@@ -168,11 +192,22 @@ class BaseStrategy(ABC):
         """
         position = self.open_positions.get(token_id)
         if not position:
-            return False
+            self.logger.warning(f"⚠️ Position not found in strategy memory: {token_id[:12]}...")
+            # Check if it exists in PositionManager
+            position = self.position_manager.get_position(token_id)
+            if not position:
+                self.logger.error(f"❌ Position not found in PositionManager either")
+                # Log executor positions for debugging
+                executor_positions = self.executor.get_all_positions()
+                self.logger.debug(f"Executor has {len(executor_positions)} positions: {list(executor_positions.keys())[:3]}")
+                return False
+            else:
+                self.logger.info(f"Found position in PositionManager, restoring to memory")
+                self.open_positions[token_id] = position
         
         self.logger.info(f"🚪 Exiting position: {position.get('question', '')[:50]}")
         
-        result = self.executor.close_position(token_id, exit_price)
+        result = await self.executor.close_position(token_id, exit_price)
         
         if result and result.get('success'):
             pnl = result.get('pnl', 0)
@@ -183,10 +218,13 @@ class BaseStrategy(ABC):
             
             self.logger.info(f"✅ Position exited: ${pnl:.2f} ({pnl_pct:+.1f}%)")
             
+            # Remove from both memory and disk
             del self.open_positions[token_id]
+            self.position_manager.remove_position(token_id)
             return True
-        
-        return False
+        else:
+            self.logger.warning(f"Failed to close position in executor")
+            return False
     
     async def scan_loop(self):
         """לולאת סריקה"""

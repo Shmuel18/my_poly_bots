@@ -14,20 +14,22 @@ def setup_logging(
     log_level: str = "INFO",
     log_to_file: bool = True,
     log_file: str = None,
-    max_file_size: int = 5 * 1024 * 1024,  # 5MB
-    backup_count: int = 3,
-    colored_console: bool = True
+    max_file_size: int = 10 * 1024 * 1024,  # 10MB (הוגדל מ-5MB)
+    backup_count: int = 10,  # 10 קבצי גיבוי (הוגדל מ-3)
+    colored_console: bool = True,
+    rotation_mode: str = "size"  # "size" או "time"
 ):
     """
-    מגדיר מערכת לוגים.
+    מגדיר מערכת לוגים עם Rotation.
     
     Args:
         log_level: רמת לוג (DEBUG, INFO, WARNING, ERROR)
         log_to_file: האם לשמור לוגים לקובץ
         log_file: נתיב לקובץ לוג (אם None, יצור אוטומטית)
-        max_file_size: גודל מקסימלי לקובץ לוג בבייטים
-        backup_count: מספר קבצי גיבוי
+        max_file_size: גודל מקסימלי לקובץ לוג בבייטים (למצב "size")
+        backup_count: מספר קבצי גיבוי לשמור
         colored_console: האם להשתמש בצבעים בקונסול
+        rotation_mode: "size" (לפי גודל) או "time" (לפי זמן - יומי)
     """
     # Get root logger
     root_logger = logging.getLogger()
@@ -72,12 +74,26 @@ def setup_logging(
             datefmt='%Y-%m-%d %H:%M:%S'
         )
         
-        file_handler = logging.handlers.RotatingFileHandler(
-            log_file,
-            maxBytes=max_file_size,
-            backupCount=backup_count,
-            encoding='utf-8'
-        )
+        # בחירת סוג Rotation לפי המצב
+        if rotation_mode == "time":
+            # Rotation יומי (בחצות)
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                log_file,
+                when='midnight',  # מחליף את הקובץ בחצות
+                interval=1,  # כל יום
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
+            # הוספת תאריך לשמות הקבצים
+            file_handler.suffix = "%Y%m%d"
+        else:
+            # Rotation לפי גודל (ברירת מחדל)
+            file_handler = logging.handlers.RotatingFileHandler(
+                log_file,
+                maxBytes=max_file_size,
+                backupCount=backup_count,
+                encoding='utf-8'
+            )
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(file_formatter)
         root_logger.addHandler(file_handler)

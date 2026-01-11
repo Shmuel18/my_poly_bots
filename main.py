@@ -17,18 +17,16 @@ from dotenv import dotenv_values
 
 from utils import setup_logging
 from utils.dynamic_loader import load_class
-from core import PolymarketConnection
-from strategies.extreme_price import ExtremePriceStrategy
-from strategies.arbitrage import ArbitrageStrategy
 
 
-def load_connection_from_env(env_path: Optional[str], dry_run: bool = False) -> PolymarketConnection:
+def load_connection_from_env(env_path: Optional[str], dry_run: bool = False):
     """Load credentials from an .env file and create a connection."""
     if env_path:
         creds = dotenv_values(env_path)
     else:
         creds = {}
-    
+    # Lazy import to avoid heavy core import when running --help
+    from core import PolymarketConnection
     return PolymarketConnection(
         api_key=creds.get('POLYMARKET_API_KEY'),
         api_secret=creds.get('POLYMARKET_API_SECRET'),
@@ -55,6 +53,14 @@ def run_strategy(
     StrategyClass: Optional[Type] = None
     if strategy_path:
         StrategyClass = load_class(strategy_path, default_class_name="Strategy")
+    else:
+        # Built-in strategies lazy import to avoid import cost on --help
+        if strategy_name == 'extreme_price':
+            from strategies.extreme_price import ExtremePriceStrategy as _BuiltIn
+            StrategyClass = _BuiltIn
+        elif strategy_name == 'arbitrage':
+            from strategies.arbitrage import ArbitrageStrategy as _BuiltIn
+            StrategyClass = _BuiltIn
     
     strategy_kwargs = strategy_kwargs or {}
     if dry_run:
@@ -118,12 +124,14 @@ def parse_args() -> argparse.Namespace:
                         help='JSON string of extra constructor kwargs for the selected strategy (dynamic or built-in). Example: "{\"min_profit_pct\": 3.0, \"scan_interval\": 120}"')
     parser.add_argument('--dry-run', action='store_true',
                         help='Simulate trades without posting orders (passes dry_run=True into strategy/executor)')
+    parser.add_argument('--log-rotation', type=str, default='size', choices=['size', 'time'],
+                        help='סוג rotation ללוגים: size (לפי גודל) או time (יומי)')
     return parser.parse_args()
 
 
 async def main_async():
     args = parse_args()
-    setup_logging(log_level=args.log_level)
+    setup_logging(log_level=args.log_level, rotation_mode=args.log_rotation)
     
     # If no env provided, fallback to process environment
     env_paths = args.env if args.env else [None]

@@ -46,7 +46,7 @@ class TradeExecutor:
             return 100000.0
         return await self.connection.get_balance()
     
-    def execute_trade(
+    async def execute_trade(
         self,
         token_id: str,
         side: str,
@@ -194,7 +194,7 @@ class TradeExecutor:
         """מחזיר פוזיציה פתוחה"""
         return self.open_positions.get(token_id)
     
-    def close_position(
+    async def close_position(
         self,
         token_id: str,
         price: Optional[float] = None
@@ -212,7 +212,8 @@ class TradeExecutor:
         position = self.open_positions.get(token_id)
         
         if not position:
-            logger.warning(f"No open position for {token_id}")
+            logger.warning(f"⚠️ No open position for {token_id[:12]}...")
+            logger.debug(f"Open positions: {list(self.open_positions.keys())}")
             return None
         
         # Get current price if not provided
@@ -249,7 +250,7 @@ class TradeExecutor:
             }
         
         # Execute sell order
-        result = self.execute_trade(
+        result = await self.execute_trade(
             token_id=token_id,
             side='SELL',
             size=position['size'],
