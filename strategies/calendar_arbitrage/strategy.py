@@ -3,6 +3,8 @@ Calendar (Logical) Arbitrage Strategy
 
 קונה NO בשוק מוקדם (תת-קבוצה) ו-YES בשוק המאוחר (על-קבוצה),
 כאשר סכום העלויות (ASK_NO מוקדם + ASK_YES מאוחר) קטן מ-1 פחות סף רווח ועמלות.
+
+Real-time WebSocket integration for sub-second early exit triggers.
 """
 import asyncio
 import logging
@@ -11,6 +13,7 @@ import re
 from typing import Dict, List, Any, Optional
 
 from strategies.base_strategy import BaseStrategy
+from strategies.calendar_arbitrage.websocket import CalendarArbitrageWebSocketManager
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +62,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # Initialize sentence transformer model (lazy loading)
         self._embedding_model = None
         self._embedding_cache = {}  # Cache embeddings to avoid recomputation
+        
+        # WebSocket manager for real-time price monitoring
+        self.ws_manager = CalendarArbitrageWebSocketManager()
+        self.ws_running = False
+        self.price_updates = {}  # {token_id: {"bid": X, "ask": Y, "mid": Z}}
 
         self.logger.info("⚙️ Configuration:")
         self.logger.info(f"   Min profit threshold: {self.min_profit_threshold:.3f}")
@@ -648,3 +656,101 @@ class CalendarArbitrageStrategy(BaseStrategy):
         except Exception as e:
             self.logger.error(f"Error during exit execution: {e}")
             return False
+    
+    async def _on_websocket_price_update(self, token_id: str, prices: Dict[str, float]):
+        """WebSocket callback: triggered on sub-second price updates.
+        
+        Checks if any open position should exit based on spread closure or loss prevention.
+        """
+        if not self.open_positions:
+            return
+        
+        # Update price cache
+        self.price_updates[token_id] = prices
+        
+        # Check each open position for early exit
+        for no_early_token, position in list(self.open_positions.items()):
+            yes_late_token = position.get("yes_late_token")
+            if not yes_late_token:
+                continue
+            
+            # Check if we should exit based on current WebSocket prices
+            should_exit = await self.should_exit(position)
+            if should_exit:
+                self.logger.info(f"🔴 WebSocket early exit triggered for {no_early_token} <-> {yes_late_token}")
+                # Schedule exit (fire and forget to avoid blocking price stream)
+                asyncio.create_task(self.exit_position(no_early_token, yes_late_token))
+    
+    async def run(self):
+        """Main strategy loop: scan for opportunities and monitor for early exits with real-time WebSocket."""
+        try:
+            # Start WebSocket connection for real-time price monitoring
+            self.logger.info("🔌 Starting WebSocket connection for real-time price monitoring...")
+            self.ws_manager.set_price_update_callback(self._on_websocket_price_update)
+            
+            # Run WebSocket in background
+            ws_task = asyncio.create_task(self.ws_manager.run())
+            self.ws_running = True
+            
+            # Wait for WebSocket to connect before starting strategy loop
+            await self.ws_manager.wait_connected()
+            self.logger.info("✅ WebSocket connected - ready for real-time monitoring")
+            
+            # Main strategy loop
+            loop_count = 0
+            while self.running:
+                try:
+                    loop_count += 1
+                    self.logger.info(f"\n{'='*60}")
+                    self.logger.info(f"📊 Scan #{loop_count}")
+                    self.logger.info(f"{'='*60}")
+                    
+                    # Full market scan
+                    opportunities = await self.scan()
+                    
+                    if opportunities:
+                        self.logger.info(f"\n✨ Found {len(opportunities)} opportunity/opportunities:")
+                        for idx, opp in enumerate(opportunities[:self.max_pairs], 1):
+                            self.logger.info(f"\n  {idx}. NO_early: {opp['no_early_q']} (ask: {opp['no_early_ask']:.3f})")
+                            self.logger.info(f"     YES_late: {opp['yes_late_q']} (ask: {opp['yes_late_ask']:.3f})")
+                            self.logger.info(f"     ROI (annualized): {opp.get('annualized_roi', 0):.1%}")
+                            self.logger.info(f"     Max slippage: {opp.get('max_slippage', 0):.1%}")
+                            
+                            # Try to enter position
+                            entered = await self.enter_position(
+                                opp["no_early_token"],
+                                opp["yes_late_token"],
+                                opp["no_early_ask"],
+                                opp["yes_late_ask"],
+                            )
+                            if entered:
+                                break  # Enter one position per scan
+                    else:
+                        self.logger.info("No opportunities found")
+                    
+                    # Log current positions
+                    if self.open_positions:
+                        self.logger.info(f"\n📍 Open positions: {len(self.open_positions)}")
+                        for no_token, pos in self.open_positions.items():
+                            yes_token = pos.get("yes_late_token", "?")
+                            entry_cost = pos.get("entry_cost", 0)
+                            self.logger.info(f"   {no_token} <-> {yes_token} (cost: ${entry_cost:.4f})")
+                    
+                    # Log stats
+                    self.logger.info(f"\n📈 Stats: {self.stats['trades_entered']} entered, {self.stats['trades_exited']} exited")
+                    
+                    # Wait for next scan
+                    await asyncio.sleep(self.scan_interval)
+                    
+                except asyncio.CancelledError:
+                    self.logger.info("Strategy run cancelled")
+                    break
+                except Exception as e:
+                    self.logger.error(f"Error in strategy loop: {e}", exc_info=True)
+                    await asyncio.sleep(5)  # Brief pause before retry
+        
+        finally:
+            # Cleanup
+            self.ws_running = False
+            await self.ws_manager.close()
+            self.logger.info("🛑 Strategy stopped")
