@@ -123,7 +123,7 @@ class PolymarketConnection:
             )
     
     def _init_client(self):
-        """אתחול CLOB client"""
+        """אתחול CLOB client עם לוגים מפורטים לאבחון"""
         try:
             if self.dry_run:
                 clob_url = self._get_or_env('CLOB_URL', 'CLOB_URL', 'https://clob.polymarket.com')
@@ -143,37 +143,52 @@ class PolymarketConnection:
             chain_id_val = self._get_or_env('CHAIN_ID', 'CHAIN_ID', 137)
             chain_id = int(chain_id_val) if isinstance(chain_id_val, (str, int)) else 137
 
+            logger.info("[DEBUG] Polymarket Init: api_key=%s... api_secret=%s... api_passphrase=%s...", api_key[:6], api_secret[:6], api_passphrase[:6])
+            logger.info("[DEBUG] private_key=%s... funder_address=%s", str(private_key)[:8], str(funder_address))
+
             creds = ApiCreds(
                 api_key=api_key.strip(),
                 api_secret=api_secret.strip(),
                 api_passphrase=api_passphrase.strip()
             )
-            
+
             # Determine signature type dynamically
             sig_type = 1 if funder_address else 0
-            
+            logger.info(f"[DEBUG] signature_type={sig_type} (1=Proxy, 0=EOA)")
+
             # Initialize CLOB client
-            self.client = ClobClient(
-                host=clob_url,
-                key=private_key,
-                chain_id=chain_id,
-                creds=creds,
-                signature_type=sig_type,
-                funder=funder_address if sig_type == 1 else None
-            )
-            
-            self.client.set_api_creds(creds)
-            
+            try:
+                self.client = ClobClient(
+                    host=clob_url,
+                    key=private_key,
+                    chain_id=chain_id,
+                    creds=creds,
+                    signature_type=sig_type,
+                    funder=funder_address if sig_type == 1 else None
+                )
+            except Exception as e:
+                logger.error(f"[DEBUG] ClobClient init failed: {e}")
+                raise
+
+            try:
+                self.client.set_api_creds(creds)
+            except Exception as e:
+                logger.error(f"[DEBUG] set_api_creds failed: {e}")
+                raise
+
             # Cache for balance
             self._balance_cache: Optional[float] = None
             self._balance_is_real = False
-            
+
             wallet_type = "Proxy (Email/Google)" if sig_type == 1 else "EOA (MetaMask)"
             logger.info(f"✅ Connected to Polymarket ({wallet_type})")
-            logger.info(f"   Signer: {self.client.get_address()}")
+            try:
+                logger.info(f"   Signer: {self.client.get_address()}")
+            except Exception as e:
+                logger.error(f"[DEBUG] get_address failed: {e}")
             if sig_type == 1:
                 logger.info(f"   Funder: {funder_address}")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize Polymarket connection: {e}")
             raise
@@ -195,18 +210,54 @@ class PolymarketConnection:
             return self._balance_cache
         
         try:
-            # Try to get balance from API
+            # Try to get balance from API (preferred)
             balance_info = self.client.get_balance_allowance()
             balance = float(balance_info.get('balance', 0))
-            
+
             self._balance_cache = balance
             self._balance_is_real = True
             logger.info(f"💰 Balance: ${balance:.2f} USDC")
-            
+
             return balance
-            
+
         except Exception as e:
-            logger.warning(f"Could not fetch balance: {e}")
+            # If the CLOB client fails (common with Proxy/Email), fallback to RPC query
+            logger.warning(f"Could not fetch balance via CLOB client: {e}")
+
+            # If we have a funder/funder address, attempt to read USDC balance directly from chain
+            funder = self.get_funder_address() or None
+            if funder:
+                try:
+                    import httpx
+                    usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+                    rpc_url = "https://polygon-rpc.com"
+                    payload = {
+                        "jsonrpc": "2.0",
+                        "method": "eth_call",
+                        "params": [{
+                            "to": usdc_contract,
+                            "data": f"0x70a08231000000000000000000000000{funder[2:]}",
+                        }, "latest"],
+                        "id": 1
+                    }
+
+                    with httpx.Client() as client:
+                        resp = client.post(rpc_url, json=payload, timeout=10)
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if 'result' in data and data['result']:
+                                balance_hex = data['result']
+                                balance_wei = int(balance_hex, 16)
+                                # USDC has 6 decimals
+                                balance = balance_wei / 1_000_000
+
+                                self._balance_cache = balance
+                                self._balance_is_real = True
+                                logger.info(f"💰 On-chain Balance: ${self._balance_cache:.2f} USDC (via RPC)")
+                                return self._balance_cache
+                except Exception as e2:
+                    logger.warning(f"RPC balance fetch failed: {e2}")
+
             # Return cached or default
             if self._balance_cache:
                 return self._balance_cache
