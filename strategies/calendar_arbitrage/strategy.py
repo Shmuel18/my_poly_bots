@@ -365,14 +365,20 @@ class CalendarArbitrageStrategy(BaseStrategy):
         if self.use_llm and self._llm_agent:
             self.logger.info("🤖 Using LLM for semantic market clustering...")
             try:
+                # Limit markets sent to LLM to avoid rate limits and response truncation
+                # Smaller batch = shorter response = no JSON truncation
+                llm_batch_size = min(100, len(markets))
+                markets_for_llm = markets[:llm_batch_size]
+                self.logger.info(f"📦 Sending {llm_batch_size} markets to LLM (of {len(markets)} total)")
+                
                 # Get LLM clusters
-                clusters = await self._llm_agent.cluster_markets(markets, max_clusters=self.max_pairs)
+                clusters = await self._llm_agent.cluster_markets(markets_for_llm, max_clusters=self.max_pairs)
                 
                 # Convert LLM clusters to groups
                 groups: List[List[Dict]] = []
                 for early_idx, late_idx, reasoning in clusters:
-                    if 0 <= early_idx < len(markets) and 0 <= late_idx < len(markets):
-                        group = [markets[early_idx], markets[late_idx]]
+                    if 0 <= early_idx < len(markets_for_llm) and 0 <= late_idx < len(markets_for_llm):
+                        group = [markets_for_llm[early_idx], markets_for_llm[late_idx]]
                         groups.append(group)
                         self.logger.debug(f"LLM cluster: {reasoning[:60]}")
                 

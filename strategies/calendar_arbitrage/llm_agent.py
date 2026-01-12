@@ -34,9 +34,9 @@ class CalendarArbitrageLLMAgent:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gpt-4o-mini",  # Faster and cheaper than gpt-4
-        temperature: float = 0.0,  # Deterministic for consistency
-        max_tokens: int = 2000,
+        model: str = "gemini-2.0-flash",  # Google Gemini Flash
+        temperature: float = 0.0,
+        max_tokens: int = 8000,  # Increased for longer responses
         enable_caching: bool = True,
     ):
         """
@@ -62,7 +62,16 @@ class CalendarArbitrageLLMAgent:
         self.enable_caching = enable_caching
 
         # Initialize OpenAI client
-        self.client = openai.OpenAI(api_key=self.api_key)
+      
+        # יצירת הלקוח עם הכתובת החדשה
+        # הגדרת הכתובת של גוגל
+        base_url = os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+
+        # יצירת הלקוח עם הכתובת החדשה
+        self.client = openai.OpenAI(
+            api_key=self.api_key,
+            base_url=base_url
+        )
 
         # Cache for repeated queries
         self.cache = {}  # {query_hash: response}
@@ -243,7 +252,7 @@ _llm_agent_instance: Optional[CalendarArbitrageLLMAgent] = None
 
 def get_llm_agent(
     api_key: Optional[str] = None,
-    model: str = "gpt-4o-mini",
+    model: str = "gemini-2.5-flash",  # Google Gemini Flash
 ) -> Optional[CalendarArbitrageLLMAgent]:
     """
     Get or create singleton LLM agent instance.
