@@ -9,6 +9,7 @@ Cross-platform arbitrage exploits **price discrepancies** between Polymarket and
 ### Basic Principle
 
 If Polymarket prices YES at 52¢ and Kalshi prices NO at 46¢:
+
 - **Buy YES on Polymarket:** Pay $0.52
 - **Buy NO on Kalshi:** Pay $0.46
 - **Total cost:** $0.98
@@ -18,10 +19,12 @@ If Polymarket prices YES at 52¢ and Kalshi prices NO at 46¢:
 ### Both Strategies
 
 **Strategy 1: YES(Poly) + NO(Kalshi)**
+
 - Works when: `P(YES_poly) + P(NO_kalshi) < 1.0 - fees`
 - Example: 0.52 + 0.46 = 0.98 < 1.00 ✅
 
 **Strategy 2: NO(Poly) + YES(Kalshi)**
+
 - Works when: `P(NO_poly) + P(YES_kalshi) < 1.0 - fees`
 - Example: 0.48 + 0.54 = 1.02 > 1.00 ❌
 
@@ -63,12 +66,12 @@ python run_cross_platform_bot.py --live --use-llm
 
 The challenge is identifying **equivalent markets** across platforms. Markets phrase the same event differently:
 
-| Polymarket | Kalshi | Equivalent? |
-|------------|--------|-------------|
-| "Bitcoin above $100k by Dec 31?" | "BTC-31DEC-B100K" | ✅ Yes |
-| "Trump wins 2024 election" | "PRES-2024-TRUMP" | ✅ Yes |
-| "Fed raises rates in March" | "FEDRATE-MAR-RAISE" | ✅ Yes |
-| "S&P 500 above 5000" | "INX-31DEC-B5000" | ⚠️ Maybe (check expiry) |
+| Polymarket                       | Kalshi              | Equivalent?             |
+| -------------------------------- | ------------------- | ----------------------- |
+| "Bitcoin above $100k by Dec 31?" | "BTC-31DEC-B100K"   | ✅ Yes                  |
+| "Trump wins 2024 election"       | "PRES-2024-TRUMP"   | ✅ Yes                  |
+| "Fed raises rates in March"      | "FEDRATE-MAR-RAISE" | ✅ Yes                  |
+| "S&P 500 above 5000"             | "INX-31DEC-B5000"   | ⚠️ Maybe (check expiry) |
 
 ### Matching Methods
 
@@ -86,6 +89,7 @@ The challenge is identifying **equivalent markets** across platforms. Markets ph
 - More accurate but costs ~$0.01 per scan
 
 Example:
+
 ```bash
 python run_cross_platform_bot.py --use-llm
 ```
@@ -97,6 +101,7 @@ python run_cross_platform_bot.py --use-llm
 **Problem:** One leg fills, other doesn't
 
 **Solution:** Concurrent execution with timeout
+
 ```python
 poly_task = execute_poly_trade()
 kalshi_task = execute_kalshi_trade()
@@ -110,6 +115,7 @@ results = await asyncio.gather(poly_task, kalshi_task, timeout=30)
 **Problem:** Prices change between scan and execution
 
 **Mitigation:**
+
 - Fast execution (< 1 second)
 - Limit orders (not market orders)
 - Slippage tolerance (reject if price moved > 1%)
@@ -119,10 +125,12 @@ results = await asyncio.gather(poly_task, kalshi_task, timeout=30)
 **Problem:** Platforms settle differently
 
 **Example:**
+
 - Polymarket: "Biden wins" → Resolves based on inauguration
 - Kalshi: "PRES-2024-BIDEN" → Resolves based on electoral college
 
 **Mitigation:**
+
 - LLM verification of resolution criteria
 - Manual review of flagged markets
 - Avoid ambiguous markets
@@ -132,6 +140,7 @@ results = await asyncio.gather(poly_task, kalshi_task, timeout=30)
 **Problem:** Exchange goes offline or delays withdrawals
 
 **Mitigation:**
+
 - Diversify capital (don't put all funds on one platform)
 - Monitor platform health
 - Quick exits if issues detected
@@ -153,6 +162,7 @@ results = await asyncio.gather(poly_task, kalshi_task, timeout=30)
 ### Net Fee Impact
 
 For $100 trade with 2% gross profit:
+
 - **Gross profit:** $2.00
 - **Polymarket fees:** $2.00 (taker)
 - **Kalshi fees:** ~$0.14 (7% of $2 profit)
@@ -241,6 +251,7 @@ INFO - ✅ Both legs executed successfully
 ### Metrics
 
 Track:
+
 - **Scan duration:** Should be < 5 seconds
 - **Match rate:** % of markets with equivalents
 - **Hit rate:** % of scans with opportunities
@@ -252,11 +263,13 @@ Track:
 ### No Opportunities Found
 
 **Causes:**
+
 1. Markets not equivalent (poor matching)
 2. Spreads too tight (< min profit)
 3. Low liquidity (can't fill size)
 
 **Solutions:**
+
 - Enable LLM matching (`--use-llm`)
 - Lower profit threshold (`--profit 0.01`)
 - Increase scan frequency (`--scan 10`)
@@ -266,6 +279,7 @@ Track:
 **Cause:** Price moved or insufficient liquidity
 
 **Solution:**
+
 ```python
 if poly_success and not kalshi_success:
     # Immediately exit Polymarket position
@@ -284,6 +298,7 @@ ERROR - Failed to fetch Kalshi markets: 401 Unauthorized
 ```
 
 **Solution:**
+
 1. Check API key in `.env`
 2. Verify account is approved for API trading
 3. Check rate limits (max 10 req/s)
@@ -295,6 +310,7 @@ ERROR - Failed to fetch Kalshi markets: 401 Unauthorized
 Instead of 1:1, use multiple markets:
 
 **Example:**
+
 - Polymarket: "Biden wins" YES @ 0.45
 - Kalshi: "DEM wins" YES @ 0.42
 - Kalshi: "TRUMP wins" NO @ 0.57
@@ -307,6 +323,7 @@ Instead of 1:1, use multiple markets:
 Combine calendar arbitrage with cross-platform:
 
 **Example:**
+
 - Polymarket: "Bitcoin $100k by March" NO @ 0.60
 - Kalshi: "BTC-31DEC-B100K" YES @ 0.35
 - Total: 0.60 + 0.35 = 0.95 < 1.00 ✅
@@ -340,14 +357,14 @@ Use historical data to predict which platform will move first:
 
 ## Comparison to Other Strategies
 
-| Feature | Cross-Platform | Calendar | Simple Spread |
-|---------|----------------|----------|---------------|
-| **Complexity** | High | Medium | Low |
-| **Frequency** | Low | Medium | High |
-| **Profit/Trade** | 2-10% | 3-15% | 1-5% |
-| **Risk** | Low | Medium | Low |
-| **Capital Required** | 2x | 2x | 1x |
-| **Execution Speed** | Fast | Medium | Fast |
+| Feature              | Cross-Platform | Calendar | Simple Spread |
+| -------------------- | -------------- | -------- | ------------- |
+| **Complexity**       | High           | Medium   | Low           |
+| **Frequency**        | Low            | Medium   | High          |
+| **Profit/Trade**     | 2-10%          | 3-15%    | 1-5%          |
+| **Risk**             | Low            | Medium   | Low           |
+| **Capital Required** | 2x             | 2x       | 1x            |
+| **Execution Speed**  | Fast           | Medium   | Fast          |
 
 **Recommendation:** Start with simple spread, graduate to calendar, then cross-platform.
 
@@ -356,16 +373,19 @@ Use historical data to predict which platform will move first:
 ### Example 1: Bitcoin $100k (Dec 2025)
 
 **Polymarket:**
+
 - Question: "Will Bitcoin hit $100k by Dec 31?"
 - YES: 0.52
 - NO: 0.48
 
 **Kalshi:**
+
 - Ticker: BTC-31DEC-B100K
 - YES: 0.46
 - NO: 0.54
 
 **Arbitrage:**
+
 - Buy YES on Polymarket: $0.52
 - Buy NO on Kalshi: $0.54
 - Total: $1.06 > $1.00 ❌ Not profitable
@@ -373,16 +393,19 @@ Use historical data to predict which platform will move first:
 ### Example 2: Fed Rate Decision (March 2026)
 
 **Polymarket:**
+
 - "Fed raises rates in March 2026"
 - YES: 0.68
 - NO: 0.32
 
 **Kalshi:**
+
 - Ticker: FEDRATE-MAR26-RAISE
 - YES: 0.65
 - NO: 0.35
 
 **Arbitrage:**
+
 - Buy NO on Polymarket: $0.32
 - Buy YES on Kalshi: $0.65
 - Total: $0.97 < $1.00 ✅
