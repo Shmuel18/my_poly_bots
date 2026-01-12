@@ -26,3 +26,6 @@ colorlog>=6.7.0
 # Utils
 python-dateutil>=2.8.2
 pytz>=2023.3
+
+# NLP & Embeddings
+sentence-transformers>=2.2.0

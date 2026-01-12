@@ -32,6 +32,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
         min_profit_threshold: float = 0.02,  # 2%
         max_pairs: int = 1000,
         dry_run: bool = False,
+        early_exit_threshold: float = 0.005,  # Exit if spread narrows to 0.5%
+        min_annualized_roi: float = 0.15,  # 15% annualized minimum
+        check_invalid_risk: bool = True,  # Check for invalid market risk
+        use_embeddings: bool = True,  # Use sentence embeddings for similarity
+        similarity_threshold: float = 0.85,  # Cosine similarity threshold (0-1)
         **kwargs,
     ):
         super().__init__(
@@ -45,11 +50,99 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.min_profit_threshold = float(min_profit_threshold)
         self.max_pairs = max_pairs
         self.estimated_fee = float(os.getenv("DEFAULT_SLIPPAGE", "0.01"))  # per leg
+        self.early_exit_threshold = float(early_exit_threshold)
+        self.min_annualized_roi = float(min_annualized_roi)
+        self.check_invalid_risk = check_invalid_risk
+        self.use_embeddings = use_embeddings
+        self.similarity_threshold = float(similarity_threshold)
+        
+        # Initialize sentence transformer model (lazy loading)
+        self._embedding_model = None
+        self._embedding_cache = {}  # Cache embeddings to avoid recomputation
 
         self.logger.info("⚙️ Configuration:")
         self.logger.info(f"   Min profit threshold: {self.min_profit_threshold:.3f}")
+        self.logger.info(f"   Early exit threshold: {self.early_exit_threshold:.3f}")
+        self.logger.info(f"   Min annualized ROI: {self.min_annualized_roi:.1%}")
         self.logger.info(f"   Estimated fee/slippage per leg: {self.estimated_fee:.3f}")
+        self.logger.info(f"   Check invalid risk: {self.check_invalid_risk}")
+        self.logger.info(f"   Use embeddings: {self.use_embeddings}")
+        if self.use_embeddings:
+            self.logger.info(f"   Similarity threshold: {self.similarity_threshold:.2f}")
         self.logger.info(f"   Scan interval: {scan_interval}s")
+
+    def _get_embedding_model(self):
+        """Lazy load sentence transformer model."""
+        if self._embedding_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer
+                self.logger.info("📦 Loading sentence embedding model (all-MiniLM-L6-v2)...")
+                self._embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+                self.logger.info("✅ Embedding model loaded successfully")
+            except ImportError:
+                self.logger.warning("⚠️ sentence-transformers not installed. Install with: pip install sentence-transformers")
+                self.use_embeddings = False
+            except Exception as e:
+                self.logger.error(f"❌ Failed to load embedding model: {e}")
+                self.use_embeddings = False
+        return self._embedding_model
+
+    def _get_embedding(self, text: str):
+        """Get cached or compute embedding for text."""
+        if text in self._embedding_cache:
+            return self._embedding_cache[text]
+        
+        model = self._get_embedding_model()
+        if model is None:
+            return None
+        
+        try:
+            embedding = model.encode(text, convert_to_tensor=False)
+            self._embedding_cache[text] = embedding
+            return embedding
+        except Exception as e:
+            self.logger.debug(f"Error computing embedding: {e}")
+            return None
+
+    def _cosine_similarity(self, embedding1, embedding2) -> float:
+        """Calculate cosine similarity between two embeddings."""
+        try:
+            import numpy as np
+            dot_product = np.dot(embedding1, embedding2)
+            norm1 = np.linalg.norm(embedding1)
+            norm2 = np.linalg.norm(embedding2)
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+            return float(dot_product / (norm1 * norm2))
+        except Exception as e:
+            self.logger.debug(f"Error calculating similarity: {e}")
+            return 0.0
+
+    def _are_similar_markets(self, q1: str, q2: str) -> bool:
+        """Check if two questions are about the same event using hybrid approach."""
+        if not q1 or not q2:
+            return False
+        
+        # Method 1: Regex-based normalization (fast pre-filter)
+        norm1 = self._normalize_question(q1)
+        norm2 = self._normalize_question(q2)
+        
+        # If normalized strings match exactly, they're similar
+        if norm1 == norm2 and norm1:
+            return True
+        
+        # Method 2: Embedding-based similarity (semantic understanding)
+        if self.use_embeddings:
+            emb1 = self._get_embedding(q1)
+            emb2 = self._get_embedding(q2)
+            
+            if emb1 is not None and emb2 is not None:
+                similarity = self._cosine_similarity(emb1, emb2)
+                self.logger.debug(f"Similarity {similarity:.3f}: '{q1[:40]}' vs '{q2[:40]}'")
+                return similarity >= self.similarity_threshold
+        
+        # Fallback: use regex match
+        return norm1 == norm2 and norm1 != ""
 
     def _normalize_question(self, q: str) -> str:
         """הורדת ביטויי זמן כדי לקבץ שווקים של אותו אירוע בסיסי.
@@ -85,6 +178,28 @@ class CalendarArbitrageStrategy(BaseStrategy):
     def _get_end_date(self, market: Dict) -> Optional[str]:
         return market.get("endDate")
 
+    def _calculate_annualized_roi(self, profit: float, days_until_close: float) -> float:
+        """חישוב תשואה שנתית (Annualized ROI)."""
+        if days_until_close <= 0:
+            return 0.0
+        # ROI = (profit / investment) * (365 / days)
+        # For calendar arb, investment ≈ total_cost
+        # Simplified: annualized_profit = profit * (365 / days)
+        return profit * (365.0 / days_until_close)
+
+    def _days_until_close(self, end_date_str: Optional[str]) -> float:
+        """חישוב ימים עד סגירת השוק."""
+        if not end_date_str:
+            return 365.0  # default fallback
+        try:
+            from datetime import datetime, timezone
+            end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            delta = (end_date - now).total_seconds() / 86400  # days
+            return max(0.1, delta)  # minimum 0.1 day
+        except:
+            return 365.0
+
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
         try:
             book = self.executor.client.get_order_book(token_id)
@@ -97,20 +212,68 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return None
         return None
 
+    def _has_invalid_risk(self, market: Dict) -> bool:
+        """בודק אם יש סיכון Invalid (שוק יכול להיות מבוטל)."""
+        if not self.check_invalid_risk:
+            return False
+        # Check if market has 'enableOrderBook' = false or other invalid indicators
+        # Polymarket: check if outcomes include 'Invalid' or market is not binary
+        outcomes = market.get("outcomes", [])
+        if isinstance(outcomes, list) and len(outcomes) > 2:
+            # More than YES/NO suggests potential invalid outcome
+            return True
+        # Check market tags/description for 'invalid' keyword
+        description = str(market.get("description", "")).lower()
+        question = str(market.get("question", "")).lower()
+        if "invalid" in description or "invalid" in question:
+            return True
+        return False
+
     async def scan(self) -> List[Dict[str, Any]]:
         """חיפוש זוגות (מוקדם, מאוחר) לאותו אירוע בסיסי, שבו ASK_NO_early + ASK_YES_late < 1 - (threshold+fees)."""
         markets = self.scanner.get_all_active_markets(max_markets=5000)
-        groups: Dict[str, List[Dict]] = {}
-
-        for m in markets:
-            key = self._normalize_question(m.get("question", ""))
-            if not key:
-                continue
-            groups.setdefault(key, []).append(m)
+        
+        # Hybrid approach: use both regex normalization AND embedding similarity
+        if self.use_embeddings:
+            # Build groups using semantic similarity
+            groups: List[List[Dict]] = []
+            processed = set()
+            
+            for i, m1 in enumerate(markets):
+                if i in processed:
+                    continue
+                q1 = m1.get("question", "")
+                if not q1:
+                    continue
+                    
+                # Start new group with m1
+                group = [m1]
+                processed.add(i)
+                
+                # Find all similar markets
+                for j, m2 in enumerate(markets[i+1:], start=i+1):
+                    if j in processed:
+                        continue
+                    q2 = m2.get("question", "")
+                    if self._are_similar_markets(q1, q2):
+                        group.append(m2)
+                        processed.add(j)
+                
+                if len(group) >= 2:
+                    groups.append(group)
+        else:
+            # Fallback: regex-only grouping (faster but less accurate)
+            groups_dict: Dict[str, List[Dict]] = {}
+            for m in markets:
+                key = self._normalize_question(m.get("question", ""))
+                if not key:
+                    continue
+                groups_dict.setdefault(key, []).append(m)
+            groups = [g for g in groups_dict.values() if len(g) >= 2]
 
         opportunities: List[Dict[str, Any]] = []
 
-        for key, group in groups.items():
+        for group in groups:
             if len(group) < 2:
                 continue
 
@@ -145,12 +308,29 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 threshold = 1.0 - min_profit_total
 
                 if total_cost < threshold:
+                    # Check for invalid market risk
+                    if self._has_invalid_risk(early) or self._has_invalid_risk(late):
+                        early_q = early.get("question", "")[:40]
+                        self.logger.debug(f"Skipping pair with invalid risk: {early_q}")
+                        continue
+
                     size_cap = min(ask_no_early.get("size", 0), ask_yes_late.get("size", 0))
                     if size_cap <= 0:
                         continue
 
+                    expected_profit = 1.0 - total_cost
+                    days_until_late = self._days_until_close(late.get("endDate"))
+                    annualized_roi = self._calculate_annualized_roi(expected_profit, days_until_late)
+
+                    # Filter by annualized ROI
+                    if annualized_roi < self.min_annualized_roi:
+                        self.logger.debug(
+                            f"Skipping low annualized ROI: {annualized_roi:.1%} < {self.min_annualized_roi:.1%}"
+                        )
+                        continue
+
                     opportunities.append({
-                        "key": key,
+                        "key": self._normalize_question(early.get("question", "")),
                         "early_question": early.get("question", ""),
                         "late_question": late.get("question", ""),
                         "early_end": early.get("endDate"),
@@ -162,7 +342,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "size": max(1.0, min(10.0, size_cap)),  # conservative default
                         "total_cost": total_cost,
                         "guaranteed_payoff": 1.0,
-                        "expected_profit": 1.0 - total_cost,
+                        "expected_profit": expected_profit,
+                        "annualized_roi": annualized_roi,
+                        "days_until_close": days_until_late,
                         "token_id": f"{no_early}:{yes_late}",  # for tracking
                     })
 
@@ -186,6 +368,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.logger.info("🧮 Calendar Arbitrage Opportunity:")
         self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} | Late(YES) ask: ${price_yes_late:.4f}")
         self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | Profit >= ${opportunity['expected_profit']:.4f}")
+        self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
         self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
         self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
 
@@ -219,5 +402,41 @@ class CalendarArbitrageStrategy(BaseStrategy):
         return False
 
     async def should_exit(self, position: Dict[str, Any]) -> bool:
-        # Positions are intended to be held to resolution; no active exit.
+        """Early exit logic: יוצא אם הפער נסגר (spread converges)."""
+        no_early_token = position.get("no_early_token")
+        yes_late_token = position.get("yes_late_token")
+        entry_cost = position.get("total_cost")
+
+        if not no_early_token or not yes_late_token or not entry_cost:
+            return False
+
+        try:
+            # Get current asks for both legs
+            ask_no = self._best_ask(no_early_token)
+            ask_yes = self._best_ask(yes_late_token)
+
+            if not ask_no or not ask_yes:
+                return False
+
+            current_cost = ask_no["price"] + ask_yes["price"]
+            current_profit = 1.0 - current_cost
+
+            # Early exit if spread narrowed significantly (below threshold)
+            if current_profit < self.early_exit_threshold:
+                self.logger.warning(
+                    f"📉 Early exit: spread narrowed to ${current_profit:.4f} < ${self.early_exit_threshold:.4f}"
+                )
+                return True
+
+            # Also consider exiting if we can realize profit now (current spread > entry spread)
+            entry_profit = 1.0 - entry_cost
+            if current_profit > entry_profit * 1.5:  # 50% improvement
+                self.logger.info(
+                    f"📈 Early exit: spread widened significantly ${current_profit:.4f} vs entry ${entry_profit:.4f}"
+                )
+                return True
+
+        except Exception as e:
+            self.logger.debug(f"Error checking early exit: {e}")
+
         return False
