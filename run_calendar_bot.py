@@ -72,6 +72,33 @@ Examples:
         help='Max pair groups to evaluate (default: 1000)'
     )
     
+    # NLP/LLM options
+    parser.add_argument(
+        '--use-embeddings',
+        action='store_true',
+        default=True,
+        help='Use sentence embeddings for similarity (default: enabled)'
+    )
+    
+    parser.add_argument(
+        '--use-llm',
+        action='store_true',
+        help='Use LLM (GPT-4) for advanced semantic clustering (requires OPENAI_API_KEY)'
+    )
+    
+    parser.add_argument(
+        '--llm-model',
+        default='gpt-4o-mini',
+        help='LLM model to use (default: gpt-4o-mini)'
+    )
+    
+    # Database options
+    parser.add_argument(
+        '--use-database',
+        action='store_true',
+        help='Use PostgreSQL for position persistence (requires database setup)'
+    )
+    
     # Logging
     parser.add_argument(
         '--log-level',
@@ -97,7 +124,10 @@ Examples:
     print(f"📈 Min profit threshold: {args.profit*100:.1f}%")
     print(f"⏱️  Scan interval: {args.scan_interval}s")
     print(f"📦 Max pairs to evaluate: {args.max_pairs}")
-    print(f"📝 Log level: {args.log_level}")
+    print(f"🧠 Use embeddings: {args.use_embeddings}")
+    print(f"🤖 Use LLM: {args.use_llm}" + (f" ({args.llm_model})" if args.use_llm else ""))
+    print(f"�️ Use database: {args.use_database}")
+    print(f"�📝 Log level: {args.log_level}")
     print("="*60 + "\n")
     
     # Setup logging
@@ -108,6 +138,10 @@ Examples:
         'min_profit_threshold': args.profit,
         'scan_interval': args.scan_interval,
         'max_pairs': args.max_pairs,
+        'use_embeddings': args.use_embeddings,
+        'use_llm': args.use_llm,
+        'llm_model': args.llm_model,
+        'use_database': args.use_database,
     }
     
     # Run strategy

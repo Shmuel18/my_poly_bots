@@ -29,3 +29,10 @@ pytz>=2023.3
 
 # NLP & Embeddings
 sentence-transformers>=2.2.0
+
+# LLM Integration
+openai>=1.12.0
+
+# Database
+asyncpg>=0.29.0
+psycopg2-binary>=2.9.0

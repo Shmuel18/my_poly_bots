@@ -14,6 +14,8 @@ from typing import Dict, List, Any, Optional
 
 from strategies.base_strategy import BaseStrategy
 from strategies.calendar_arbitrage.websocket import CalendarArbitrageWebSocketManager
+from strategies.calendar_arbitrage.llm_agent import get_llm_agent, CalendarArbitrageLLMAgent
+from core.database import get_database, DatabaseManager
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +42,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
         check_invalid_risk: bool = True,  # Check for invalid market risk
         use_embeddings: bool = True,  # Use sentence embeddings for similarity
         similarity_threshold: float = 0.85,  # Cosine similarity threshold (0-1)
+        use_llm: bool = False,  # Use LLM for advanced semantic clustering
+        llm_model: str = "gpt-4o-mini",  # LLM model to use
+        use_database: bool = False,  # Use PostgreSQL for position persistence
         **kwargs,
     ):
         super().__init__(
@@ -58,15 +63,35 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.check_invalid_risk = check_invalid_risk
         self.use_embeddings = use_embeddings
         self.similarity_threshold = float(similarity_threshold)
+        self.use_llm = use_llm
+        self.llm_model = llm_model
         
         # Initialize sentence transformer model (lazy loading)
         self._embedding_model = None
         self._embedding_cache = {}  # Cache embeddings to avoid recomputation
         
+        # Initialize LLM agent (lazy loading)
+        self._llm_agent: Optional[CalendarArbitrageLLMAgent] = None
+        if use_llm:
+            try:
+                self._llm_agent = get_llm_agent(model=llm_model)
+                if self._llm_agent:
+                    self.logger.info(f"🤖 LLM Agent enabled: {llm_model}")
+                else:
+                    self.logger.warning("⚠️ LLM Agent requested but not available (check OPENAI_API_KEY)")
+                    self.use_llm = False
+            except Exception as e:
+                self.logger.warning(f"⚠️ LLM Agent initialization failed: {e}")
+                self.use_llm = False
+        
         # WebSocket manager for real-time price monitoring
         self.ws_manager = CalendarArbitrageWebSocketManager()
         self.ws_running = False
         self.price_updates = {}  # {token_id: {"bid": X, "ask": Y, "mid": Z}}
+        
+        # Database for position persistence
+        self.use_database = use_database
+        self.db: Optional[DatabaseManager] = None
 
         self.logger.info("⚙️ Configuration:")
         self.logger.info(f"   Min profit threshold: {self.min_profit_threshold:.3f}")
@@ -77,6 +102,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.logger.info(f"   Use embeddings: {self.use_embeddings}")
         if self.use_embeddings:
             self.logger.info(f"   Similarity threshold: {self.similarity_threshold:.2f}")
+        self.logger.info(f"   Use LLM: {self.use_llm}")
+        if self.use_llm:
+            self.logger.info(f"   LLM model: {self.llm_model}")
         self.logger.info(f"   Scan interval: {scan_interval}s")
 
     def _get_embedding_model(self):
@@ -207,6 +235,36 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return max(0.1, delta)  # minimum 0.1 day
         except:
             return 365.0
+    
+    def _cluster_markets_by_embeddings(self, markets: List[Dict]) -> List[List[Dict]]:
+        """Build groups using semantic similarity (embeddings)."""
+        groups: List[List[Dict]] = []
+        processed = set()
+        
+        for i, m1 in enumerate(markets):
+            if i in processed:
+                continue
+            q1 = m1.get("question", "")
+            if not q1:
+                continue
+                
+            # Start new group with m1
+            group = [m1]
+            processed.add(i)
+            
+            # Find all similar markets
+            for j, m2 in enumerate(markets[i+1:], start=i+1):
+                if j in processed:
+                    continue
+                q2 = m2.get("question", "")
+                if self._are_similar_markets(q1, q2):
+                    group.append(m2)
+                    processed.add(j)
+            
+            if len(group) >= 2:
+                groups.append(group)
+        
+        return groups
 
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
         try:
@@ -303,34 +361,31 @@ class CalendarArbitrageStrategy(BaseStrategy):
         """חיפוש זוגות (מוקדם, מאוחר) לאותו אירוע בסיסי, שבו ASK_NO_early + ASK_YES_late < 1 - (threshold+fees)."""
         markets = self.scanner.get_all_active_markets(max_markets=5000)
         
+        # Use LLM for clustering if enabled
+        if self.use_llm and self._llm_agent:
+            self.logger.info("🤖 Using LLM for semantic market clustering...")
+            try:
+                # Get LLM clusters
+                clusters = await self._llm_agent.cluster_markets(markets, max_clusters=self.max_pairs)
+                
+                # Convert LLM clusters to groups
+                groups: List[List[Dict]] = []
+                for early_idx, late_idx, reasoning in clusters:
+                    if 0 <= early_idx < len(markets) and 0 <= late_idx < len(markets):
+                        group = [markets[early_idx], markets[late_idx]]
+                        groups.append(group)
+                        self.logger.debug(f"LLM cluster: {reasoning[:60]}")
+                
+                self.logger.info(f"🤖 LLM identified {len(groups)} calendar pairs")
+                
+            except Exception as e:
+                self.logger.error(f"LLM clustering failed, falling back to embeddings: {e}")
+                # Fallback to embedding-based clustering
+                groups = self._cluster_markets_by_embeddings(markets)
+        
         # Hybrid approach: use both regex normalization AND embedding similarity
-        if self.use_embeddings:
-            # Build groups using semantic similarity
-            groups: List[List[Dict]] = []
-            processed = set()
-            
-            for i, m1 in enumerate(markets):
-                if i in processed:
-                    continue
-                q1 = m1.get("question", "")
-                if not q1:
-                    continue
-                    
-                # Start new group with m1
-                group = [m1]
-                processed.add(i)
-                
-                # Find all similar markets
-                for j, m2 in enumerate(markets[i+1:], start=i+1):
-                    if j in processed:
-                        continue
-                    q2 = m2.get("question", "")
-                    if self._are_similar_markets(q1, q2):
-                        group.append(m2)
-                        processed.add(j)
-                
-                if len(group) >= 2:
-                    groups.append(group)
+        elif self.use_embeddings:
+            groups = self._cluster_markets_by_embeddings(markets)
         else:
             # Fallback: regex-only grouping (faster but less accurate)
             groups_dict: Dict[str, List[Dict]] = {}
@@ -524,7 +579,53 @@ class CalendarArbitrageStrategy(BaseStrategy):
             "group_id": group_id,
             "actual_entry_cost": total_cost_with_slippage,  # Track actual cost
         }
-        # Track both tokens under same group
+        
+        # Save to database if enabled
+        if self.use_database and self.db:
+            try:
+                # Create position records
+                no_pos_id = await self.db.create_position(
+                    strategy=self.strategy_name,
+                    token_id=no_early_token,
+                    side="BUY",
+                    size=size,
+                    entry_price=fill_no["avg_price"],
+                    metadata={"leg": "NO_early", "group_id": group_id, **opportunity},
+                )
+                yes_pos_id = await self.db.create_position(
+                    strategy=self.strategy_name,
+                    token_id=yes_late_token,
+                    side="BUY",
+                    size=size,
+                    entry_price=fill_yes["avg_price"],
+                    metadata={"leg": "YES_late", "group_id": group_id, **opportunity},
+                )
+                
+                # Record trades
+                await self.db.record_trade(
+                    position_id=no_pos_id,
+                    strategy=self.strategy_name,
+                    token_id=no_early_token,
+                    side="BUY",
+                    size=size,
+                    price=fill_no["avg_price"],
+                    fee=self.estimated_fee * size,
+                )
+                await self.db.record_trade(
+                    position_id=yes_pos_id,
+                    strategy=self.strategy_name,
+                    token_id=yes_late_token,
+                    side="BUY",
+                    size=size,
+                    price=fill_yes["avg_price"],
+                    fee=self.estimated_fee * size,
+                )
+                
+                self.logger.debug(f"💾 Saved positions to database: {no_pos_id}, {yes_pos_id}")
+            except Exception as e:
+                self.logger.warning(f"Failed to save to database: {e}")
+        
+        # Track both tokens under same group (in-memory fallback)
         self.open_positions[no_early_token] = pos_data
         self.open_positions[yes_late_token] = pos_data
         self.position_manager.add_position(token_id=no_early_token, entry_price=fill_no["avg_price"], size=size, metadata=pos_data)
@@ -635,6 +736,53 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             # Check if both orders succeeded
             if all(not isinstance(r, Exception) and r.get("success") for r in results):
+                # Calculate P&L
+                exit_value = (bid_no["price"] if bid_no else 0) + (bid_yes["price"] if bid_yes else 0)
+                pnl = exit_value - entry_cost - (2 * self.estimated_fee)
+                
+                # Save to database if enabled
+                if self.use_database and self.db:
+                    try:
+                        # Get position IDs from database
+                        no_pos = await self.db.get_position_by_token(no_early_token, self.strategy_name)
+                        yes_pos = await self.db.get_position_by_token(yes_late_token, self.strategy_name)
+                        
+                        if no_pos:
+                            await self.db.close_position(
+                                position_id=no_pos["id"],
+                                exit_price=bid_no["price"] if bid_no else 0,
+                                pnl=pnl / 2,  # Split P&L between legs
+                            )
+                            await self.db.record_trade(
+                                position_id=no_pos["id"],
+                                strategy=self.strategy_name,
+                                token_id=no_early_token,
+                                side="SELL",
+                                size=size,
+                                price=bid_no["price"] if bid_no else 0,
+                                fee=self.estimated_fee * size,
+                            )
+                        
+                        if yes_pos:
+                            await self.db.close_position(
+                                position_id=yes_pos["id"],
+                                exit_price=bid_yes["price"] if bid_yes else 0,
+                                pnl=pnl / 2,
+                            )
+                            await self.db.record_trade(
+                                position_id=yes_pos["id"],
+                                strategy=self.strategy_name,
+                                token_id=yes_late_token,
+                                side="SELL",
+                                size=size,
+                                price=bid_yes["price"] if bid_yes else 0,
+                                fee=self.estimated_fee * size,
+                            )
+                        
+                        self.logger.debug(f"💾 Saved exit to database. P&L: {pnl:.4f}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to save exit to database: {e}")
+                
                 # Clean up positions from memory and manager
                 self.open_positions.pop(no_early_token, None)
                 self.open_positions.pop(yes_late_token, None)
@@ -642,7 +790,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 self.position_manager.remove_position(yes_late_token)
                 
                 self.stats["trades_exited"] += 1
-                self.logger.info("✅ Successfully exited both legs")
+                self.logger.info(f"✅ Successfully exited both legs (P&L: {pnl:.4f})")
                 return True
             else:
                 # Log failures
@@ -684,6 +832,16 @@ class CalendarArbitrageStrategy(BaseStrategy):
     async def run(self):
         """Main strategy loop: scan for opportunities and monitor for early exits with real-time WebSocket."""
         try:
+            # Connect to database if enabled
+            if self.use_database:
+                self.logger.info("🗄️ Connecting to PostgreSQL database...")
+                self.db = await get_database()
+                if self.db:
+                    self.logger.info("✅ Database connected - positions will be persisted")
+                else:
+                    self.logger.warning("⚠️ Database connection failed - using in-memory fallback")
+                    self.use_database = False
+            
             # Start WebSocket connection for real-time price monitoring
             self.logger.info("🔌 Starting WebSocket connection for real-time price monitoring...")
             self.ws_manager.set_price_update_callback(self._on_websocket_price_update)
