@@ -367,7 +367,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
             try:
                 # Limit markets sent to LLM to avoid rate limits and response truncation
                 # Smaller batch = shorter response = no JSON truncation
-                llm_batch_size = min(100, len(markets))
+                llm_batch_size = min(50, len(markets))
                 markets_for_llm = markets[:llm_batch_size]
                 self.logger.info(f"📦 Sending {llm_batch_size} markets to LLM (of {len(markets)} total)")
                 

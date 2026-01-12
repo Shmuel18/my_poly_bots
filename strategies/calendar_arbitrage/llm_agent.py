@@ -26,7 +26,7 @@ class CalendarArbitrageLLMAgent:
         api_key: Optional[str] = None,
         model: str = "gemini-2.0-flash",
         temperature: float = 0.0,
-        max_output_tokens: int = 1024,
+        max_output_tokens: int = 4096,
         timeout_sec: float = 45.0,
     ):
         # Google API key (Gemini). Prefer GEMINI_API_KEY in .env
