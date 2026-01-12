@@ -6,28 +6,31 @@ The LLM Agent uses GPT-4 (or compatible models) to identify logical relationship
 
 ## Why LLM vs Embeddings?
 
-| Feature | SBERT Embeddings | LLM Agent (GPT-4) |
-|---------|------------------|-------------------|
-| **Speed** | Fast (milliseconds) | Slower (1-3 seconds per batch) |
-| **Cost** | Free (local) | ~$0.01-0.05 per 1000 markets |
-| **Accuracy** | Good for similar text | Excellent for complex logic |
-| **Causal Understanding** | ❌ No | ✅ Yes |
-| **Temporal Logic** | Limited | ✅ Excellent |
-| **Subset/Superset** | Surface-level | ✅ Deep reasoning |
+| Feature                  | SBERT Embeddings      | LLM Agent (GPT-4)              |
+| ------------------------ | --------------------- | ------------------------------ |
+| **Speed**                | Fast (milliseconds)   | Slower (1-3 seconds per batch) |
+| **Cost**                 | Free (local)          | ~$0.01-0.05 per 1000 markets   |
+| **Accuracy**             | Good for similar text | Excellent for complex logic    |
+| **Causal Understanding** | ❌ No                 | ✅ Yes                         |
+| **Temporal Logic**       | Limited               | ✅ Excellent                   |
+| **Subset/Superset**      | Surface-level         | ✅ Deep reasoning              |
 
 ## Examples
 
 ### What LLM Can Detect (That Embeddings Miss)
 
 1. **Causal Relationships**
+
    - "Trump wins presidency" → "Republican Senate majority"
    - "Fed raises rates" → "Stock market drops 10%"
 
 2. **Temporal Dependencies**
+
    - "Inflation above 3% in Q1" vs "Inflation above 3% in 2024"
    - "Bitcoin $100k by March" vs "Bitcoin $100k by December"
 
 3. **Implicit Context**
+
    - "Will X happen?" vs "Will X definitely happen?"
    - "Over 50%" vs "At least 50%"
 
@@ -55,11 +58,11 @@ LLM_MODEL=gpt-4o-mini
 
 ### 3. Models Comparison
 
-| Model | Speed | Cost (per 1M tokens) | Quality |
-|-------|-------|----------------------|---------|
-| `gpt-4o-mini` | ⚡ Fast | $0.15 input, $0.60 output | ⭐⭐⭐⭐ |
-| `gpt-4o` | 🐢 Medium | $2.50 input, $10.00 output | ⭐⭐⭐⭐⭐ |
-| `gpt-4-turbo` | 🐌 Slow | $10.00 input, $30.00 output | ⭐⭐⭐⭐⭐ |
+| Model         | Speed     | Cost (per 1M tokens)        | Quality    |
+| ------------- | --------- | --------------------------- | ---------- |
+| `gpt-4o-mini` | ⚡ Fast   | $0.15 input, $0.60 output   | ⭐⭐⭐⭐   |
+| `gpt-4o`      | 🐢 Medium | $2.50 input, $10.00 output  | ⭐⭐⭐⭐⭐ |
+| `gpt-4-turbo` | 🐌 Slow   | $10.00 input, $30.00 output | ⭐⭐⭐⭐⭐ |
 
 **Recommendation:** Start with `gpt-4o-mini` for cost-effectiveness.
 
@@ -97,6 +100,7 @@ opportunities = await strategy.scan()
 ### 1. Prompt Engineering
 
 The LLM receives:
+
 - List of markets with questions and expiry dates
 - Task description (calendar arbitrage logic)
 - Output format (JSON with pairs)
@@ -149,6 +153,7 @@ The bot uses a **waterfall approach**:
 3. Fallback to regex (if embeddings disabled)
 
 This ensures **robustness** even if:
+
 - API key is invalid
 - Rate limits are hit
 - Network fails
@@ -195,6 +200,7 @@ def _build_clustering_prompt(self, markets: List[Dict[str, Any]]) -> str:
 ### Multiple LLM Providers
 
 Replace `openai` client with:
+
 - **Anthropic Claude:** `import anthropic`
 - **Local LLama:** `import llama_cpp`
 - **Azure OpenAI:** `openai.api_type = "azure"`
@@ -224,11 +230,11 @@ export OPENAI_API_KEY=sk-proj-...
 
 ## Performance Benchmarks
 
-| Method | Time per Scan | Markets Clustered | Accuracy |
-|--------|---------------|-------------------|----------|
-| Regex | 0.1s | 500 | 60% |
-| Embeddings | 2.5s | 500 | 85% |
-| LLM | 4.2s | 500 | 95% |
+| Method     | Time per Scan | Markets Clustered | Accuracy |
+| ---------- | ------------- | ----------------- | -------- |
+| Regex      | 0.1s          | 500               | 60%      |
+| Embeddings | 2.5s          | 500               | 85%      |
+| LLM        | 4.2s          | 500               | 95%      |
 
 **Verdict:** LLM is **2x slower** but **10% more accurate** than embeddings.
 
