@@ -1,277 +1,207 @@
-"""
-LLM Agent for Semantic Market Clustering
-
-Uses GPT-4 or Claude to identify logical relationships between markets
-that are too complex for regex or embeddings alone.
-
-Advantages over SBERT:
-- Understands causal relationships (e.g., "Trump wins" → "Republican Senate")
-- Detects temporal dependencies (Q1 vs Q2 vs Annual)
-- Identifies subset/superset relationships with reasoning
-- Handles ambiguous phrasing and implicit context
-"""
-
-import asyncio
 import json
 import logging
 import os
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+
+import httpx
 
 logger = logging.getLogger(__name__)
 
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-    logger.warning("OpenAI not installed. LLM agent disabled. Install: pip install openai")
+
+def _redact_key_from_url(url: str) -> str:
+    # avoid leaking ?key=... into logs
+    if "key=" not in url:
+        return url
+    base, _, qs = url.partition("?")
+    parts = qs.split("&")
+    parts = ["key=***" if p.startswith("key=") else p for p in parts]
+    return base + "?" + "&".join(parts)
 
 
 class CalendarArbitrageLLMAgent:
-    """LLM-powered agent for advanced market clustering."""
+    """LLM agent for Google Gemini API (generateContent)."""
 
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-2.0-flash",  # Google Gemini Flash
+        model: str = "gemini-2.0-flash",
         temperature: float = 0.0,
-        max_tokens: int = 8000,  # Increased for longer responses
-        enable_caching: bool = True,
+        max_output_tokens: int = 1024,
+        timeout_sec: float = 45.0,
     ):
-        """
-        Initialize LLM agent.
-
-        Args:
-            api_key: OpenAI API key (defaults to OPENAI_API_KEY env var)
-            model: Model to use (gpt-4o-mini, gpt-4o, gpt-4-turbo)
-            temperature: Sampling temperature (0 = deterministic)
-            max_tokens: Max response length
-            enable_caching: Cache responses for identical queries
-        """
-        if not OPENAI_AVAILABLE:
-            raise ImportError("OpenAI package not installed. Run: pip install openai")
-
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        # Google API key (Gemini). Prefer GEMINI_API_KEY in .env
+        self.api_key = (
+            api_key
+            or os.getenv("GEMINI_API_KEY")
+            or os.getenv("GOOGLE_API_KEY")
+            # backward-compat if you used OPENAI_API_KEY for Google before:
+            or os.getenv("OPENAI_API_KEY")
+        )
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY not set. Set in .env or pass to constructor.")
+            raise ValueError("Missing API key. Set GEMINI_API_KEY in .env")
 
         self.model = model
-        self.temperature = temperature
-        self.max_tokens = max_tokens
-        self.enable_caching = enable_caching
+        self.temperature = float(temperature)
+        self.max_output_tokens = int(max_output_tokens)
+        self.timeout_sec = float(timeout_sec)
 
-        # Initialize OpenAI client
-      
-        # יצירת הלקוח עם הכתובת החדשה
-        # הגדרת הכתובת של גוגל
-        base_url = os.getenv("OPENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta/openai/")
+        self.base_url = os.getenv("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        self.url = f"{self.base_url}/models/{self.model}:generateContent"
 
-        # יצירת הלקוח עם הכתובת החדשה
-        self.client = openai.OpenAI(
-            api_key=self.api_key,
-            base_url=base_url
-        )
-
-        # Cache for repeated queries
-        self.cache = {}  # {query_hash: response}
-
-        logger.info(f"LLM Agent initialized with model: {model}")
+        logger.info(f"🤖 LLM Agent Initialized | Model: {self.model} | Provider: Google Gemini")
 
     def _build_clustering_prompt(self, markets: List[Dict[str, Any]]) -> str:
-        """Build prompt for market clustering task."""
-        # Format markets for LLM
         market_descriptions = []
         for idx, market in enumerate(markets):
             question = market.get("question", "Unknown")
             end_date = market.get("end_date_iso", "Unknown")
             market_descriptions.append(f"{idx+1}. \"{question}\" (expires: {end_date})")
 
-        prompt = f"""You are an expert in prediction markets and logical arbitrage strategies.
+        return f"""You are an expert in prediction market arbitrage.
+Identify pairs of markets that describe the SAME underlying event but with DIFFERENT expiries.
+The early expiry must be a logical SUBSET of the late expiry.
 
-**Task:** Identify groups of markets that describe the SAME underlying event but with DIFFERENT time horizons.
-
-**Calendar Arbitrage Logic:**
-- Markets are related if they measure the same outcome but one expires EARLIER (subset) and one LATER (superset)
-- Example: "Trump wins by March" (early) vs "Trump wins by Election Day" (late)
-- The early market is a SUBSET of the late market (if early YES → late YES)
-
-**Markets to analyze:**
+Markets:
 {chr(10).join(market_descriptions)}
 
-**Instructions:**
-1. Group markets by the SAME underlying event
-2. Within each group, identify which market expires EARLIEST (subset) and which expires LATEST (superset)
-3. Only include pairs where early expiry is a logical subset of late expiry
-4. Ignore markets that don't have clear temporal relationships
-
-**Output Format (JSON):**
-```json
+Return ONLY valid JSON in this exact format:
 {{
   "clusters": [
     {{
-      "event_description": "Brief description of the underlying event",
+      "event_description": "short description",
       "early_market_index": 1,
       "late_market_index": 3,
-      "reasoning": "Why these markets form a calendar arbitrage pair"
+      "reasoning": "why"
     }}
   ]
-}}
-```
+}}"""
 
-**Return ONLY valid JSON, no explanatory text.**"""
+    @staticmethod
+    def _extract_text(resp_json: Dict[str, Any]) -> str:
+        # Gemini typical structure:
+        # candidates[0].content.parts[0].text
+        candidates = resp_json.get("candidates") or []
+        if not candidates:
+            return ""
+        content = (candidates[0] or {}).get("content") or {}
+        parts = content.get("parts") or []
+        if not parts:
+            return ""
+        text = (parts[0] or {}).get("text") or ""
+        return str(text).strip()
 
-        return prompt
+    @staticmethod
+    def _strip_markdown_fences(text: str) -> str:
+        t = text.strip()
+        if "```" not in t:
+            return t
+        # try to grab first fenced block
+        try:
+            t2 = t.split("```", 1)[1]
+            t2 = t2.split("```", 1)[0].strip()
+            if t2.lower().startswith("json"):
+                t2 = t2[4:].strip()
+            return t2
+        except Exception:
+            return t
+
+    @staticmethod
+    def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
+        # 1) direct
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+
+        # 2) strip markdown fences
+        stripped = CalendarArbitrageLLMAgent._strip_markdown_fences(text)
+        if stripped != text:
+            try:
+                return json.loads(stripped)
+            except Exception:
+                pass
+
+        # 3) extract first {...} span (best-effort)
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                return json.loads(stripped[start : end + 1])
+            except Exception:
+                pass
+
+        return None
 
     async def cluster_markets(
         self,
         markets: List[Dict[str, Any]],
         max_clusters: int = 50,
     ) -> List[Tuple[int, int, str]]:
-        """
-        Use LLM to identify calendar arbitrage pairs.
-
-        Args:
-            markets: List of market dictionaries with 'question' and 'end_date_iso'
-            max_clusters: Maximum number of pairs to return
-
-        Returns:
-            List of tuples: (early_market_idx, late_market_idx, reasoning)
-        """
         if not markets:
             return []
 
-        # Build prompt
         prompt = self._build_clustering_prompt(markets)
 
-        # Check cache
-        cache_key = hash(prompt) if self.enable_caching else None
-        if cache_key and cache_key in self.cache:
-            logger.debug("LLM cache hit")
-            response_text = self.cache[cache_key]
-        else:
-            # Call OpenAI API
-            try:
-                logger.info(f"Calling LLM ({self.model}) for {len(markets)} markets...")
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": "You are an expert in prediction market arbitrage."},
-                        {"role": "user", "content": prompt},
-                    ],
-                    temperature=self.temperature,
-                    max_tokens=self.max_tokens,
-                )
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_output_tokens,
+                "responseMimeType": "application/json",
+            },
+        }
 
-                response_text = response.choices[0].message.content.strip()
+        # IMPORTANT: keep key OUT of the URL to avoid accidental logs.
+        # Gemini expects it as a query param, but we won't log it.
+        params = {"key": self.api_key}
 
-                # Cache response
-                if cache_key:
-                    self.cache[cache_key] = response_text
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                r = await client.post(self.url, params=params, json=payload)
 
-                logger.info(f"LLM response received ({response.usage.total_tokens} tokens)")
-
-            except Exception as e:
-                logger.error(f"LLM API call failed: {e}")
+            if r.status_code != 200:
+                # log without leaking key
+                safe_url = _redact_key_from_url(str(r.request.url)) if r.request else self.url
+                logger.error(f"❌ Gemini HTTP {r.status_code} @ {safe_url}: {r.text}")
                 return []
 
-        # Parse JSON response
-        try:
-            # Extract JSON from markdown code blocks if present
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0].strip()
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0].strip()
+            resp_json = r.json()
+            text = self._extract_text(resp_json)
+            if not text:
+                logger.error(f"❌ Gemini returned empty text. Raw response: {resp_json}")
+                return []
 
-            data = json.loads(response_text)
-            clusters = data.get("clusters", [])
+            parsed = self._try_parse_json(text)
+            if not parsed:
+                logger.error(f"❌ LLM JSON parse failed. Raw text: {text[:500]}")
+                return []
 
-            # Convert to tuples
-            result = []
-            for cluster in clusters[:max_clusters]:
-                early_idx = cluster.get("early_market_index")
-                late_idx = cluster.get("late_market_index")
-                reasoning = cluster.get("reasoning", "")
+            clusters = parsed.get("clusters", []) or []
+            result: List[Tuple[int, int, str]] = []
 
-                if early_idx is not None and late_idx is not None:
-                    # Convert to 0-indexed
-                    result.append((early_idx - 1, late_idx - 1, reasoning))
+            for c in clusters[:max_clusters]:
+                early = c.get("early_market_index")
+                late = c.get("late_market_index")
+                if isinstance(early, int) and isinstance(late, int):
+                    result.append((early - 1, late - 1, str(c.get("reasoning", ""))))
 
-            logger.info(f"LLM identified {len(result)} calendar pairs")
+            logger.info(f"🤖 LLM found {len(result)} potential arbitrage pairs")
             return result
 
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse LLM JSON response: {e}")
-            logger.debug(f"Raw response: {response_text[:500]}")
+        except Exception as e:
+            logger.error(f"❌ LLM Error: {e}")
             return []
 
-    async def explain_relationship(
-        self,
-        market1_question: str,
-        market2_question: str,
-    ) -> Optional[str]:
-        """
-        Ask LLM to explain the logical relationship between two markets.
 
-        Returns:
-            Explanation string or None if no clear relationship
-        """
-        prompt = f"""Analyze the relationship between these two prediction markets:
-
-Market 1: "{market1_question}"
-Market 2: "{market2_question}"
-
-**Question:** Is Market 1 a logical subset of Market 2 (or vice versa)? 
-
-**Answer in 1-2 sentences:**"""
-
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-                max_tokens=150,
-            )
-
-            explanation = response.choices[0].message.content.strip()
-            return explanation
-
-        except Exception as e:
-            logger.error(f"LLM explanation failed: {e}")
-            return None
-
-    def clear_cache(self):
-        """Clear the response cache."""
-        self.cache.clear()
-        logger.info("LLM cache cleared")
-
-
-# Singleton instance for reuse
 _llm_agent_instance: Optional[CalendarArbitrageLLMAgent] = None
 
 
-def get_llm_agent(
-    api_key: Optional[str] = None,
-    model: str = "gemini-2.5-flash",  # Google Gemini Flash
-) -> Optional[CalendarArbitrageLLMAgent]:
-    """
-    Get or create singleton LLM agent instance.
-
-    Returns None if OpenAI is not available or API key is not set.
-    """
+def get_llm_agent(api_key: Optional[str] = None, model: str = "gemini-2.0-flash"):
     global _llm_agent_instance
-
-    if not OPENAI_AVAILABLE:
-        return None
-
     if _llm_agent_instance is None:
         try:
-            _llm_agent_instance = CalendarArbitrageLLMAgent(
-                api_key=api_key,
-                model=model,
-            )
-        except (ImportError, ValueError) as e:
-            logger.warning(f"LLM agent disabled: {e}")
+            _llm_agent_instance = CalendarArbitrageLLMAgent(api_key=api_key, model=model)
+        except Exception as e:
+            logger.warning(f"LLM Agent disabled: {e}")
             return None
-
     return _llm_agent_instance
