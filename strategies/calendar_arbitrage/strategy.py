@@ -212,6 +212,19 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return None
         return None
 
+    def _best_bid(self, token_id: str) -> Optional[Dict[str, float]]:
+        """Get best bid price (price we can sell at)."""
+        try:
+            book = self.executor.client.get_order_book(token_id)
+            bids = book.get("bids", []) if book else []
+            if bids:
+                p = float(bids[0].get("price", 0))
+                s = float(bids[0].get("size", 0)) if bids[0].get("size") is not None else 0.0
+                return {"price": p, "size": s}
+        except Exception:
+            return None
+        return None
+
     def _has_invalid_risk(self, market: Dict) -> bool:
         """בודק אם יש סיכון Invalid (שוק יכול להיות מבוטל)."""
         if not self.check_invalid_risk:
@@ -402,41 +415,125 @@ class CalendarArbitrageStrategy(BaseStrategy):
         return False
 
     async def should_exit(self, position: Dict[str, Any]) -> bool:
-        """Early exit logic: יוצא אם הפער נסגר (spread converges)."""
+        """
+        בודק האם ניתן לצאת ברווח לפני סגירת השוק (Settlement).
+        Early exit based on BID prices (actual exit value).
+        """
         no_early_token = position.get("no_early_token")
         yes_late_token = position.get("yes_late_token")
         entry_cost = position.get("total_cost")
 
-        if not no_early_token or not yes_late_token or not entry_cost:
+        if not no_early_token or not yes_late_token or entry_cost is None:
             return False
 
         try:
-            # Get current asks for both legs
-            ask_no = self._best_ask(no_early_token)
-            ask_yes = self._best_ask(yes_late_token)
+            # Get current BID prices (what we can sell for)
+            bid_no = self._best_bid(no_early_token)
+            bid_yes = self._best_bid(yes_late_token)
 
-            if not ask_no or not ask_yes:
+            if not bid_no or not bid_yes:
                 return False
 
-            current_cost = ask_no["price"] + ask_yes["price"]
-            current_profit = 1.0 - current_cost
+            # Current exit value = sum of bids
+            current_exit_value = bid_no["price"] + bid_yes["price"]
+            
+            # Exit threshold: entry cost + selling fees + small profit margin
+            exit_threshold = entry_cost + (2 * self.estimated_fee) + self.early_exit_threshold
 
-            # Early exit if spread narrowed significantly (below threshold)
-            if current_profit < self.early_exit_threshold:
-                self.logger.warning(
-                    f"📉 Early exit: spread narrowed to ${current_profit:.4f} < ${self.early_exit_threshold:.4f}"
-                )
-                return True
-
-            # Also consider exiting if we can realize profit now (current spread > entry spread)
-            entry_profit = 1.0 - entry_cost
-            if current_profit > entry_profit * 1.5:  # 50% improvement
+            # Exit if we can sell for profit
+            if current_exit_value > exit_threshold:
+                profit = current_exit_value - entry_cost - (2 * self.estimated_fee)
                 self.logger.info(
-                    f"📈 Early exit: spread widened significantly ${current_profit:.4f} vs entry ${entry_profit:.4f}"
+                    f"💰 Early exit triggered! Exit value: ${current_exit_value:.4f} > "
+                    f"Threshold: ${exit_threshold:.4f} (Profit: ${profit:.4f})"
                 )
                 return True
+
+            # Also check if spread narrowed too much (loss prevention)
+            if current_exit_value < entry_cost:
+                loss = entry_cost - current_exit_value
+                # Exit if loss exceeds threshold (e.g., 2%)
+                if loss > 0.02:  # Max 2% loss tolerance
+                    self.logger.warning(
+                        f"📉 Early exit: spread reversed! Loss: ${loss:.4f} "
+                        f"(Exit: ${current_exit_value:.4f} < Entry: ${entry_cost:.4f})"
+                    )
+                    return True
 
         except Exception as e:
             self.logger.debug(f"Error checking early exit: {e}")
 
         return False
+
+    async def exit_position(self, token_id: str, exit_price: Optional[float] = None) -> bool:
+        """
+        ביצוע יציאה מוקדמת - מכירת שני צדי הארביטראז'.
+        Executes early exit by selling both legs concurrently.
+        """
+        position = self.open_positions.get(token_id)
+        if not position:
+            return False
+
+        no_early_token = position.get("no_early_token")
+        yes_late_token = position.get("yes_late_token")
+        size = position.get("size", 1.0)
+        entry_cost = position.get("total_cost", 0)
+
+        if not no_early_token or not yes_late_token:
+            self.logger.error(f"Missing token IDs in position: {token_id}")
+            return False
+
+        self.logger.info(f"🚪 Executing early exit for {position.get('key', 'unknown')[:40]}")
+
+        try:
+            # Get current bid prices for logging
+            bid_no = self._best_bid(no_early_token)
+            bid_yes = self._best_bid(yes_late_token)
+            
+            if bid_no and bid_yes:
+                exit_value = bid_no["price"] + bid_yes["price"]
+                expected_pnl = exit_value - entry_cost - (2 * self.estimated_fee)
+                self.logger.info(f"   Expected exit: ${exit_value:.4f} | P&L: ${expected_pnl:.4f}")
+
+            # Execute SELL orders for both legs concurrently
+            # Using market orders (price=0.01 for SELL means accept any bid)
+            tasks = [
+                self.executor.execute_trade(
+                    token_id=no_early_token, 
+                    side="SELL", 
+                    size=size, 
+                    price=bid_no["price"] if bid_no else 0.01
+                ),
+                self.executor.execute_trade(
+                    token_id=yes_late_token, 
+                    side="SELL", 
+                    size=size, 
+                    price=bid_yes["price"] if bid_yes else 0.01
+                ),
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Check if both orders succeeded
+            if all(not isinstance(r, Exception) and r.get("success") for r in results):
+                # Clean up positions from memory and manager
+                self.open_positions.pop(no_early_token, None)
+                self.open_positions.pop(yes_late_token, None)
+                self.position_manager.remove_position(no_early_token)
+                self.position_manager.remove_position(yes_late_token)
+                
+                self.stats["trades_exited"] += 1
+                self.logger.info("✅ Successfully exited both legs")
+                return True
+            else:
+                # Log failures
+                for i, (leg_name, result) in enumerate([("NO_early", results[0]), ("YES_late", results[1])]):
+                    if isinstance(result, Exception) or not result.get("success"):
+                        self.logger.error(f"Failed to exit {leg_name}: {result}")
+                
+                self.logger.error("❌ Partial exit - manual intervention may be required")
+                return False
+
+        except Exception as e:
+            self.logger.error(f"Error during exit execution: {e}")
+            return False
