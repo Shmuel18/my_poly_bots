@@ -225,6 +225,55 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return None
         return None
 
+    def _simulate_fill(self, token_id: str, side: str, size: float) -> Optional[Dict[str, float]]:
+        """
+        סימולציית מילוי - חישוב מחיר ממוצע משוקלל לפי עומק ה-Order Book.
+        Fill simulation for slippage calculation.
+        """
+        try:
+            book = self.executor.client.get_order_book(token_id)
+            if not book:
+                return None
+            
+            # For BUY: consume asks (sellers), for SELL: consume bids (buyers)
+            orders = book.get("asks" if side == "BUY" else "bids", [])
+            if not orders:
+                return None
+            
+            remaining_size = size
+            total_cost = 0.0
+            filled_size = 0.0
+            
+            for order in orders:
+                order_price = float(order.get("price", 0))
+                order_size = float(order.get("size", 0)) if order.get("size") is not None else 0.0
+                
+                if order_size <= 0:
+                    continue
+                
+                fill_amount = min(remaining_size, order_size)
+                total_cost += fill_amount * order_price
+                filled_size += fill_amount
+                remaining_size -= fill_amount
+                
+                if remaining_size <= 0:
+                    break
+            
+            if filled_size == 0:
+                return None
+            
+            avg_price = total_cost / filled_size
+            return {
+                "avg_price": avg_price,
+                "filled_size": filled_size,
+                "requested_size": size,
+                "fully_filled": remaining_size <= 0.01,  # tolerance
+                "slippage": (avg_price - float(orders[0].get("price", 0))) if orders else 0.0,
+            }
+        except Exception as e:
+            self.logger.debug(f"Error simulating fill: {e}")
+            return None
+
     def _has_invalid_risk(self, market: Dict) -> bool:
         """בודק אם יש סיכון Invalid (שוק יכול להיות מבוטל)."""
         if not self.check_invalid_risk:
@@ -371,48 +420,110 @@ class CalendarArbitrageStrategy(BaseStrategy):
         return True
 
     async def enter_position(self, opportunity: Dict[str, Any]) -> bool:
-        """ביצוע שתי העסקאות במקביל: קניית NO במוקדם ו-YES במאוחר."""
+        """ביצוע שתי העסקאות במקביל: קניית NO במוקדם ו-YES במאוחר עם טיפול בסיכון רגליים."""
         no_early_token = opportunity["no_early_token"]
         yes_late_token = opportunity["yes_late_token"]
         size = float(opportunity.get("size", 1.0))
         price_no_early = float(opportunity["ask_no_early"])  # pay ask
         price_yes_late = float(opportunity["ask_yes_late"])  # pay ask
 
+        # Simulate fills for slippage protection
+        fill_no = self._simulate_fill(no_early_token, "BUY", size)
+        fill_yes = self._simulate_fill(yes_late_token, "BUY", size)
+        
+        # Check if we can actually fill both legs
+        if not fill_no or not fill_yes:
+            self.logger.warning("⚠️ Cannot simulate fills - insufficient orderbook data")
+            return False
+        
+        if not fill_no.get("fully_filled") or not fill_yes.get("fully_filled"):
+            self.logger.warning(
+                f"⚠️ Insufficient liquidity: NO={fill_no.get('filled_size'):.1f}/{size:.1f}, "
+                f"YES={fill_yes.get('filled_size'):.1f}/{size:.1f}"
+            )
+            return False
+        
+        # Calculate total cost with slippage
+        total_cost_with_slippage = fill_no["avg_price"] + fill_yes["avg_price"]
+        min_profit_total = self.min_profit_threshold + (2 * self.estimated_fee)
+        
+        if total_cost_with_slippage >= (1.0 - min_profit_total):
+            self.logger.warning(
+                f"⚠️ Slippage kills profit: ${total_cost_with_slippage:.4f} >= ${1.0 - min_profit_total:.4f}"
+            )
+            return False
+
         self.logger.info("🧮 Calendar Arbitrage Opportunity:")
-        self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} | Late(YES) ask: ${price_yes_late:.4f}")
-        self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | Profit >= ${opportunity['expected_profit']:.4f}")
+        self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} (avg: ${fill_no['avg_price']:.4f})")
+        self.logger.info(f"   Late(YES) ask: ${price_yes_late:.4f} (avg: ${fill_yes['avg_price']:.4f})")
+        self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | With slippage: ${total_cost_with_slippage:.4f}")
         self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
         self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
         self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
 
         # Execute both legs concurrently
         tasks = [
-            self.executor.execute_trade(token_id=no_early_token, side="BUY", size=size, price=price_no_early),
-            self.executor.execute_trade(token_id=yes_late_token, side="BUY", size=size, price=price_yes_late),
+            self.executor.execute_trade(token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"]),
+            self.executor.execute_trade(token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"]),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        success = all(isinstance(r, dict) and r.get("success") for r in results)
-        if success:
-            group_id = f"CAL-{no_early_token[:6]}-{yes_late_token[:6]}"
-            pos_data = {
-                **opportunity,
-                "entry_time": asyncio.get_event_loop().time(),
-                "size": size,
-                "strategy_name": self.strategy_name,
-                "group_id": group_id,
-            }
-            # Track both tokens under same group
-            self.open_positions[no_early_token] = pos_data
-            self.open_positions[yes_late_token] = pos_data
-            self.position_manager.add_position(token_id=no_early_token, entry_price=price_no_early, size=size, metadata=pos_data)
-            self.position_manager.add_position(token_id=yes_late_token, entry_price=price_yes_late, size=size, metadata=pos_data)
-            self.stats["trades_entered"] += 1
-            self.logger.info("✅ Calendar arbitrage legs filled")
-            return True
-
-        self.logger.warning("⚠️ Failed to execute both legs; consider manual review")
-        return False
+        
+        # Check results
+        no_early_success = isinstance(results[0], dict) and results[0].get("success")
+        yes_late_success = isinstance(results[1], dict) and results[1].get("success")
+        
+        # Handle leg risk - rollback if partial fill
+        if no_early_success and not yes_late_success:
+            self.logger.error("❌ YES leg failed, rolling back NO position")
+            try:
+                rollback = await self.executor.execute_trade(
+                    token_id=no_early_token, side="SELL", size=size, price=0.01
+                )
+                if rollback and rollback.get("success"):
+                    self.logger.info("✅ Rollback successful")
+                else:
+                    self.logger.error("🚨 ROLLBACK FAILED - manual intervention required!")
+            except Exception as e:
+                self.logger.error(f"🚨 Rollback exception: {e}")
+            return False
+        
+        elif yes_late_success and not no_early_success:
+            self.logger.error("❌ NO leg failed, rolling back YES position")
+            try:
+                rollback = await self.executor.execute_trade(
+                    token_id=yes_late_token, side="SELL", size=size, price=0.01
+                )
+                if rollback and rollback.get("success"):
+                    self.logger.info("✅ Rollback successful")
+                else:
+                    self.logger.error("🚨 ROLLBACK FAILED - manual intervention required!")
+            except Exception as e:
+                self.logger.error(f"🚨 Rollback exception: {e}")
+            return False
+        
+        elif not no_early_success and not yes_late_success:
+            self.logger.error("❌ Both legs failed")
+            return False
+        
+        # Both succeeded
+        group_id = f"CAL-{no_early_token[:6]}-{yes_late_token[:6]}"
+        pos_data = {
+            **opportunity,
+            "entry_time": asyncio.get_event_loop().time(),
+            "size": size,
+            "strategy_name": self.strategy_name,
+            "group_id": group_id,
+            "actual_entry_cost": total_cost_with_slippage,  # Track actual cost
+        }
+        # Track both tokens under same group
+        self.open_positions[no_early_token] = pos_data
+        self.open_positions[yes_late_token] = pos_data
+        self.position_manager.add_position(token_id=no_early_token, entry_price=fill_no["avg_price"], size=size, metadata=pos_data)
+        self.position_manager.add_position(token_id=yes_late_token, entry_price=fill_yes["avg_price"], size=size, metadata=pos_data)
+        self.stats["trades_entered"] += 1
+        self.logger.info("✅ Calendar arbitrage legs filled")
+        return True
 
     async def should_exit(self, position: Dict[str, Any]) -> bool:
         """
