@@ -266,10 +266,14 @@ class BaseStrategy(ABC):
         """לולאת מעקב אחר פוזיציות"""
         while self.running:
             try:
-                # Check all open positions
+                # Check all open positions (snapshot to avoid mutation during iteration)
                 for token_id, position in list(self.open_positions.items()):
-                    if await self.should_exit(position):
-                        await self.exit_position(token_id)
+                    try:
+                        if await self.should_exit(position):
+                            await self.exit_position(token_id)
+                    except Exception as e:
+                        self.logger.warning(f"Error checking/exiting position {token_id[:12]}: {e}")
+                        continue
                 
                 await asyncio.sleep(30)  # Check every 30 seconds
                 
