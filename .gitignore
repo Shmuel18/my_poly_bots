@@ -1,4 +1,4 @@
-Python
+# Python
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+.pytest_cache/
 
 # Virtual Environment
 venv/
@@ -37,10 +38,19 @@ config/.env
 *.swo
 *~
 
-# Logs
+# Logs & Data
 logs/
 *.log
 data/
+*.csv
+*.xlsx
+
+# Cache & Temp
+.cache/
+*.tmp
+__pycache__/
+*.pyo
+*.pyd
 
 # OS
 .DS_Store
@@ -50,3 +60,5 @@ Thumbs.db
 test_results/
 backups/
 temp/
+*.bak
+*.orig
