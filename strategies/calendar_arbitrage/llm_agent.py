@@ -7,7 +7,6 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-
 def _redact_key_from_url(url: str) -> str:
     # avoid leaking ?key=... into logs
     if "key=" not in url:
@@ -17,10 +16,7 @@ def _redact_key_from_url(url: str) -> str:
     parts = ["key=***" if p.startswith("key=") else p for p in parts]
     return base + "?" + "&".join(parts)
 
-
 class CalendarArbitrageLLMAgent:
-    """LLM agent for Google Gemini API (generateContent)."""
-
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -34,7 +30,6 @@ class CalendarArbitrageLLMAgent:
             api_key
             or os.getenv("GEMINI_API_KEY")
             or os.getenv("GOOGLE_API_KEY")
-            # backward-compat if you used OPENAI_API_KEY for Google before:
             or os.getenv("OPENAI_API_KEY")
         )
         if not self.api_key:
@@ -49,6 +44,74 @@ class CalendarArbitrageLLMAgent:
         self.url = f"{self.base_url}/models/{self.model}:generateContent"
 
         logger.info(f"🤖 LLM Agent Initialized | Model: {self.model} | Provider: Google Gemini")
+
+    async def cluster_markets_debug(
+        self,
+        markets: List[Dict[str, Any]],
+        max_clusters: int = 50,
+    ) -> Tuple[List[Tuple[int, int, str]], str]:
+        """
+        Like cluster_markets, but returns (clusters, raw_llm_text) for debugging/logging.
+        """
+        if not markets:
+            return [], ""
+
+        prompt = self._build_clustering_prompt(markets)
+
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": {
+                "temperature": self.temperature,
+                "maxOutputTokens": self.max_output_tokens,
+                "responseMimeType": "application/json",
+            },
+        }
+        params = {"key": self.api_key}
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
+                r = await client.post(self.url, params=params, json=payload)
+
+            if r.status_code != 200:
+                safe_url = _redact_key_from_url(str(r.request.url)) if r.request else self.url
+                logger.error(f"❌ Gemini HTTP {r.status_code} @ {safe_url}: {r.text}")
+                return [], r.text
+
+            resp_json = r.json()
+            text = self._extract_text(resp_json)
+            if not text:
+                logger.error(f"❌ Gemini returned empty text. Raw response: {resp_json}")
+                return [], str(resp_json)
+
+            parsed = self._try_parse_json(text)
+            if not parsed:
+                logger.error(f"❌ LLM JSON parse failed. Raw text: {text[:500]}")
+                return [], text
+
+            clusters = parsed.get("clusters", []) or []
+            result: List[Tuple[int, int, str]] = []
+
+            for c in clusters[:max_clusters]:
+                early = c.get("early_market_index")
+                late = c.get("late_market_index")
+                if isinstance(early, int) and isinstance(late, int):
+                    # Convert 1-based index from LLM to 0-based for Python
+                    result.append((early - 1, late - 1, str(c.get("reasoning", ""))))
+
+            logger.info(f"🤖 LLM found {len(result)} potential arbitrage pairs")
+            return result, text
+
+        except Exception as e:
+            logger.error(f"❌ LLM Error: {e}")
+            return [], str(e)
+
+    async def cluster_markets(
+        self,
+        markets: List[Dict[str, Any]],
+        max_clusters: int = 50,
+    ) -> List[Tuple[int, int, str]]:
+        clusters, _ = await self.cluster_markets_debug(markets, max_clusters)
+        return clusters
 
     def _build_clustering_prompt(self, markets: List[Dict[str, Any]]) -> str:
         market_descriptions = []
@@ -78,8 +141,6 @@ Return ONLY valid JSON in this exact format:
 
     @staticmethod
     def _extract_text(resp_json: Dict[str, Any]) -> str:
-        # Gemini typical structure:
-        # candidates[0].content.parts[0].text
         candidates = resp_json.get("candidates") or []
         if not candidates:
             return ""
@@ -95,7 +156,6 @@ Return ONLY valid JSON in this exact format:
         t = text.strip()
         if "```" not in t:
             return t
-        # try to grab first fenced block
         try:
             t2 = t.split("```", 1)[1]
             t2 = t2.split("```", 1)[0].strip()
@@ -107,13 +167,11 @@ Return ONLY valid JSON in this exact format:
 
     @staticmethod
     def _try_parse_json(text: str) -> Optional[Dict[str, Any]]:
-        # 1) direct
         try:
             return json.loads(text)
         except Exception:
             pass
 
-        # 2) strip markdown fences
         stripped = CalendarArbitrageLLMAgent._strip_markdown_fences(text)
         if stripped != text:
             try:
@@ -121,7 +179,6 @@ Return ONLY valid JSON in this exact format:
             except Exception:
                 pass
 
-        # 3) extract first {...} span (best-effort)
         start = stripped.find("{")
         end = stripped.rfind("}")
         if start != -1 and end != -1 and end > start:
@@ -129,72 +186,9 @@ Return ONLY valid JSON in this exact format:
                 return json.loads(stripped[start : end + 1])
             except Exception:
                 pass
-
         return None
 
-    async def cluster_markets(
-        self,
-        markets: List[Dict[str, Any]],
-        max_clusters: int = 50,
-    ) -> List[Tuple[int, int, str]]:
-        if not markets:
-            return []
-
-        prompt = self._build_clustering_prompt(markets)
-
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "temperature": self.temperature,
-                "maxOutputTokens": self.max_output_tokens,
-                "responseMimeType": "application/json",
-            },
-        }
-
-        # IMPORTANT: keep key OUT of the URL to avoid accidental logs.
-        # Gemini expects it as a query param, but we won't log it.
-        params = {"key": self.api_key}
-
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout_sec) as client:
-                r = await client.post(self.url, params=params, json=payload)
-
-            if r.status_code != 200:
-                # log without leaking key
-                safe_url = _redact_key_from_url(str(r.request.url)) if r.request else self.url
-                logger.error(f"❌ Gemini HTTP {r.status_code} @ {safe_url}: {r.text}")
-                return []
-
-            resp_json = r.json()
-            text = self._extract_text(resp_json)
-            if not text:
-                logger.error(f"❌ Gemini returned empty text. Raw response: {resp_json}")
-                return []
-
-            parsed = self._try_parse_json(text)
-            if not parsed:
-                logger.error(f"❌ LLM JSON parse failed. Raw text: {text[:500]}")
-                return []
-
-            clusters = parsed.get("clusters", []) or []
-            result: List[Tuple[int, int, str]] = []
-
-            for c in clusters[:max_clusters]:
-                early = c.get("early_market_index")
-                late = c.get("late_market_index")
-                if isinstance(early, int) and isinstance(late, int):
-                    result.append((early - 1, late - 1, str(c.get("reasoning", ""))))
-
-            logger.info(f"🤖 LLM found {len(result)} potential arbitrage pairs")
-            return result
-
-        except Exception as e:
-            logger.error(f"❌ LLM Error: {e}")
-            return []
-
-
 _llm_agent_instance: Optional[CalendarArbitrageLLMAgent] = None
-
 
 def get_llm_agent(api_key: Optional[str] = None, model: str = "gemini-2.0-flash"):
     global _llm_agent_instance

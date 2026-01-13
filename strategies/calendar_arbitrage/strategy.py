@@ -6,10 +6,12 @@ Calendar (Logical) Arbitrage Strategy
 
 Real-time WebSocket integration for sub-second early exit triggers.
 """
+
 import asyncio
 import logging
 import os
 import re
+import json
 from typing import Dict, List, Any, Optional
 
 from strategies.base_strategy import BaseStrategy
@@ -29,22 +31,48 @@ MONTH_WORDS = [
 class CalendarArbitrageStrategy(BaseStrategy):
     """ארביטראז' לוגי בין שווקים עם טווחי זמן שונים לאותו אירוע."""
 
+
+    def __init__(self, *args, **kwargs):
+        # ...existing code...
+        self.market_offset = 0
+        self.discovered_pairs_file = "data/discovered_pairs.json"
+        self.discovered_pairs = self._load_discovered_pairs()
+        # ...existing code...
+
+    def _load_discovered_pairs(self):
+        if os.path.exists(self.discovered_pairs_file):
+            try:
+                with open(self.discovered_pairs_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.warning(f"Failed to load discovered pairs: {e}")
+                return []
+        return []
+
+    def _save_discovered_pairs(self):
+        try:
+            os.makedirs(os.path.dirname(self.discovered_pairs_file), exist_ok=True)
+            with open(self.discovered_pairs_file, 'w', encoding='utf-8') as f:
+                json.dump(self.discovered_pairs, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"❌ Failed to save discovered pairs: {e}")
+
     def __init__(
         self,
         strategy_name: str = "CalendarArbitrageStrategy",
         scan_interval: int = 10,
         log_level: str = "INFO",
-        min_profit_threshold: float = 0.02,  # 2%
+        min_profit_threshold: float = 0.01,
         max_pairs: int = 1000,
         dry_run: bool = False,
-        early_exit_threshold: float = 0.005,  # Exit if spread narrows to 0.5%
-        min_annualized_roi: float = 0.15,  # 15% annualized minimum
-        check_invalid_risk: bool = True,  # Check for invalid market risk
-        use_embeddings: bool = True,  # Use sentence embeddings for similarity
-        similarity_threshold: float = 0.85,  # Cosine similarity threshold (0-1)
-        use_llm: bool = False,  # Use LLM for advanced semantic clustering
-        llm_model: str = "gpt-4o-mini",  # LLM model to use
-        use_database: bool = False,  # Use PostgreSQL for position persistence
+        early_exit_threshold: float = 0.005,
+        min_annualized_roi: float = 0.15,
+        check_invalid_risk: bool = True,
+        use_embeddings: bool = True,
+        similarity_threshold: float = 0.85,
+        use_llm: bool = True,
+        llm_model: str = "gemini-2.0-flash",
+        use_database: bool = False,
         **kwargs,
     ):
         super().__init__(
@@ -55,9 +83,15 @@ class CalendarArbitrageStrategy(BaseStrategy):
             dry_run=dry_run,
         )
 
+        # --- 1. הגדרות נתיבים וקבצים ---
+        self.PAIRS_FILE = os.path.join("data", "discovered_pairs.json")
+        
+        # --- 2. הגדרות לוגיקה וסיבוב ---
+        self.market_offset = 0
+        self.llm_batch_size = 100
         self.min_profit_threshold = float(min_profit_threshold)
         self.max_pairs = max_pairs
-        self.estimated_fee = float(os.getenv("DEFAULT_SLIPPAGE", "0.01"))  # per leg
+        self.estimated_fee = float(os.getenv("DEFAULT_SLIPPAGE", "0.01"))
         self.early_exit_threshold = float(early_exit_threshold)
         self.min_annualized_roi = float(min_annualized_roi)
         self.check_invalid_risk = check_invalid_risk
@@ -65,33 +99,68 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.similarity_threshold = float(similarity_threshold)
         self.use_llm = use_llm
         self.llm_model = llm_model
-        
-        # Initialize sentence transformer model (lazy loading)
+
+        # --- 3. טעינת זוגות שנשמרו בעבר ---
+        self.discovered_pairs = self._load_discovered_pairs()
+
+        # --- 4. אתחול סוכנים ומנהלים ---
         self._embedding_model = None
-        self._embedding_cache = {}  # Cache embeddings to avoid recomputation
-        
-        # Initialize LLM agent (lazy loading)
-        self._llm_agent: Optional[CalendarArbitrageLLMAgent] = None
-        if use_llm:
+        self._embedding_cache = {}
+        self._llm_agent = None
+        if self.use_llm:
             try:
                 self._llm_agent = get_llm_agent(model=llm_model)
                 if self._llm_agent:
                     self.logger.info(f"🤖 LLM Agent enabled: {llm_model}")
-                else:
-                    self.logger.warning("⚠️ LLM Agent requested but not available (check OPENAI_API_KEY)")
-                    self.use_llm = False
             except Exception as e:
                 self.logger.warning(f"⚠️ LLM Agent initialization failed: {e}")
                 self.use_llm = False
-        
-        # WebSocket manager for real-time price monitoring
+
         self.ws_manager = CalendarArbitrageWebSocketManager()
         self.ws_running = False
-        self.price_updates = {}  # {token_id: {"bid": X, "ask": Y, "mid": Z}}
-        
-        # Database for position persistence
+        self.price_updates = {}
         self.use_database = use_database
-        self.db: Optional[DatabaseManager] = None
+        self.db = None
+        
+        self.logger.info(f"✅ Initialized with {len(self.discovered_pairs)} saved pairs.")
+    def _load_discovered_pairs(self) -> List[Dict]:
+        """טעינת זוגות שנמצאו בעבר מהדיסק."""
+        if os.path.exists(self.PAIRS_FILE):
+            try:
+                with open(self.PAIRS_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data if isinstance(data, list) else []
+            except Exception as e:
+                self.logger.warning(f"Failed to load discovered pairs: {e}")
+                return []
+        return []
+
+    def _save_discovered_pairs(self):
+        """שמירת זוגות שנמצאו לדיסק."""
+        try:
+            os.makedirs(os.path.dirname(self.PAIRS_FILE), exist_ok=True)
+            with open(self.PAIRS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.discovered_pairs, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.error(f"❌ Failed to save discovered pairs: {e}")
+
+    def _cleanup_expired_pairs(self, active_market_ids: set):
+        """מחיקת זוגות שהשווקים שלהם כבר לא קיימים בבורסה (Expired)."""
+        initial_count = len(self.discovered_pairs)
+        self.discovered_pairs = [
+            p for p in self.discovered_pairs 
+            if p['early_id'] in active_market_ids and p['late_id'] in active_market_ids
+        ]
+        if len(self.discovered_pairs) < initial_count:
+            self.logger.info(f"🧹 Cleanup: Removed {initial_count - len(self.discovered_pairs)} expired pairs.")
+            self._save_discovered_pairs()
+
+    def _save_discovered_pairs(self):
+        try:
+            with open(self.PAIRS_FILE, "w", encoding="utf-8") as f:
+                json.dump(self.discovered_pairs, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.warning(f"Failed to save discovered pairs: {e}")
 
         self.logger.info("⚙️ Configuration:")
         self.logger.info(f"   Min profit threshold: {self.min_profit_threshold:.3f}")
@@ -105,7 +174,8 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.logger.info(f"   Use LLM: {self.use_llm}")
         if self.use_llm:
             self.logger.info(f"   LLM model: {self.llm_model}")
-        self.logger.info(f"   Scan interval: {scan_interval}s")
+        # התיקון בשורה למטה: הוספת self.
+        self.logger.info(f"   Scan interval: {self.scan_interval}s")
 
     def _get_embedding_model(self):
         """Lazy load sentence transformer model."""
@@ -357,130 +427,112 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return True
         return False
 
+
     async def scan(self) -> List[Dict[str, Any]]:
-        """חיפוש זוגות (מוקדם, מאוחר) לאותו אירוע בסיסי, שבו ASK_NO_early + ASK_YES_late < 1 - (threshold+fees)."""
-        markets = self.scanner.get_all_active_markets(max_markets=5000)
+        """סריקת שווקים: גילוי זוגות חדשים בסיבוב ומעקב אחרי קיימים."""
+        # 1. שליפת כל השווקים הפעילים (עד 5000)
+        all_markets = self.scanner.get_all_active_markets(max_markets=5000)
+        if not all_markets:
+            return []
         
-        # Use LLM for clustering if enabled
+        # יצירת מפות לחיפוש מהיר
+        active_ids = {m['id'] for m in all_markets}
+        market_map = {m['id']: m for m in all_markets}
+
+        # --- שלב א': Discovery (LLM Rotation) ---
         if self.use_llm and self._llm_agent:
-            self.logger.info("🤖 Using LLM for semantic market clustering...")
+            start = self.market_offset
+            end = min(start + self.llm_batch_size, len(all_markets))
+            batch = all_markets[start:end]
+            
+            self.logger.info(f"📦 Discovery Scan: Markets {start}-{end} / {len(all_markets)}")
             try:
-                # Limit markets sent to LLM to avoid rate limits and response truncation
-                # Smaller batch = shorter response = no JSON truncation
-                llm_batch_size = min(50, len(markets))
-                markets_for_llm = markets[:llm_batch_size]
-                self.logger.info(f"📦 Sending {llm_batch_size} markets to LLM (of {len(markets)} total)")
+                # קריאה ל-LLM לקבלת זוגות (משתמש ב-cluster_markets_debug שבנינו קודם)
+                new_pairs, raw_text = await self._llm_agent.cluster_markets_debug(batch)
                 
-                # Get LLM clusters
-                clusters = await self._llm_agent.cluster_markets(markets_for_llm, max_clusters=self.max_pairs)
+                for b_early, b_late, reason in new_pairs:
+                    early_id = batch[b_early]['id']
+                    late_id = batch[b_late]['id']
+                    
+                    # הוספה רק אם הזוג באמת חדש
+                    if not any(p['early_id'] == early_id and p['late_id'] == late_id for p in self.discovered_pairs):
+                        self.discovered_pairs.append({
+                            "early_id": early_id,
+                            "late_id": late_id,
+                            "description": reason,
+                            "discovered_at": str(asyncio.get_event_loop().time())
+                        })
+                        self.logger.info(f"✨ Discovered pair: {batch[b_early]['question']}")
                 
-                # Convert LLM clusters to groups
-                groups: List[List[Dict]] = []
-                for early_idx, late_idx, reasoning in clusters:
-                    if 0 <= early_idx < len(markets_for_llm) and 0 <= late_idx < len(markets_for_llm):
-                        group = [markets_for_llm[early_idx], markets_for_llm[late_idx]]
-                        groups.append(group)
-                        self.logger.debug(f"LLM cluster: {reasoning[:60]}")
-                
-                self.logger.info(f"🤖 LLM identified {len(groups)} calendar pairs")
-                
+                self._save_discovered_pairs()
             except Exception as e:
-                self.logger.error(f"LLM clustering failed, falling back to embeddings: {e}")
-                # Fallback to embedding-based clustering
-                groups = self._cluster_markets_by_embeddings(markets)
+                self.logger.error(f"❌ LLM Discovery failed: {e}")
+
+            # עדכון ה-Offset לסריקה הבאה
+            self.market_offset = end
+            if self.market_offset >= len(all_markets):
+                self.market_offset = 0
+                self._cleanup_expired_pairs(active_ids)  # ניקוי זוגות ישנים בסיום סיבוב מלא
+
+        # --- שלב ב': Monitoring (בדיקת מחירים לכל הזוגות בזיכרון) ---
+        opportunities = []
+        self.logger.info(f"📈 Checking prices for {len(self.discovered_pairs)} monitored pairs...")
         
-        # Hybrid approach: use both regex normalization AND embedding similarity
-        elif self.use_embeddings:
-            groups = self._cluster_markets_by_embeddings(markets)
-        else:
-            # Fallback: regex-only grouping (faster but less accurate)
-            groups_dict: Dict[str, List[Dict]] = {}
-            for m in markets:
-                key = self._normalize_question(m.get("question", ""))
-                if not key:
-                    continue
-                groups_dict.setdefault(key, []).append(m)
-            groups = [g for g in groups_dict.values() if len(g) >= 2]
-
-        opportunities: List[Dict[str, Any]] = []
-
-        for group in groups:
-            if len(group) < 2:
+        for pair in self.discovered_pairs:
+            early_m = market_map.get(pair['early_id'])
+            late_m = market_map.get(pair['late_id'])
+            
+            if not early_m or not late_m:
                 continue
 
-            # Sort by endDate ascending (earlier first)
-            def _end(m):
-                ed = self._get_end_date(m)
-                return ed or "9999-12-31T00:00:00Z"
+            # שליפת Token IDs
+            tid_early = self._get_token_ids(early_m)
+            tid_late = self._get_token_ids(late_m)
+            
+            if len(tid_early) < 2 or len(tid_late) < 2:
+                continue
 
-            group_sorted = sorted(group, key=_end)
+            # הגדרת אסימונים: NO במוקדם, YES במאוחר
+            no_early_token = tid_early[1] 
+            yes_late_token = tid_late[0]
 
-            # Evaluate adjacent pairs (early, late)
-            for i in range(len(group_sorted) - 1):
-                early = group_sorted[i]
-                late = group_sorted[i + 1]
+            # קבלת מחירי Ask
+            ask_no = self._best_ask(no_early_token)
+            ask_yes = self._best_ask(yes_late_token)
 
-                tid_early = self._get_token_ids(early)
-                tid_late = self._get_token_ids(late)
-                if len(tid_early) < 2 or len(tid_late) < 2:
+            if not ask_no or not ask_yes:
+                continue
+
+            # חישוב רווח
+            total_cost = ask_no["price"] + ask_yes["price"]
+            min_req = self.min_profit_threshold + (2 * self.estimated_fee)
+            
+            if total_cost < (1.0 - min_req):
+                # בדיקת סיכון "Invalid"
+                if self._has_invalid_risk(early_m) or self._has_invalid_risk(late_m):
                     continue
 
-                yes_early, no_early = tid_early[0], tid_early[1]
-                yes_late, no_late = tid_late[0], tid_late[1]
+                expected_profit = 1.0 - total_cost
+                days = self._days_until_close(late_m.get("endDate"))
+                annualized_roi = self._calculate_annualized_roi(expected_profit, days)
 
-                ask_no_early = self._best_ask(no_early)
-                ask_yes_late = self._best_ask(yes_late)
-                if not ask_no_early or not ask_yes_late:
-                    continue
-
-                total_cost = (ask_no_early["price"] + ask_yes_late["price"])  # cost per unit
-                # Account for fees per leg
-                min_profit_total = self.min_profit_threshold + (2 * self.estimated_fee)
-                threshold = 1.0 - min_profit_total
-
-                if total_cost < threshold:
-                    # Check for invalid market risk
-                    if self._has_invalid_risk(early) or self._has_invalid_risk(late):
-                        early_q = early.get("question", "")[:40]
-                        self.logger.debug(f"Skipping pair with invalid risk: {early_q}")
-                        continue
-
-                    size_cap = min(ask_no_early.get("size", 0), ask_yes_late.get("size", 0))
-                    if size_cap <= 0:
-                        continue
-
-                    expected_profit = 1.0 - total_cost
-                    days_until_late = self._days_until_close(late.get("endDate"))
-                    annualized_roi = self._calculate_annualized_roi(expected_profit, days_until_late)
-
-                    # Filter by annualized ROI
-                    if annualized_roi < self.min_annualized_roi:
-                        self.logger.debug(
-                            f"Skipping low annualized ROI: {annualized_roi:.1%} < {self.min_annualized_roi:.1%}"
-                        )
-                        continue
-
+                if annualized_roi >= self.min_annualized_roi:
                     opportunities.append({
-                        "key": self._normalize_question(early.get("question", "")),
-                        "early_question": early.get("question", ""),
-                        "late_question": late.get("question", ""),
-                        "early_end": early.get("endDate"),
-                        "late_end": late.get("endDate"),
-                        "no_early_token": no_early,
-                        "yes_late_token": yes_late,
-                        "ask_no_early": ask_no_early["price"],
-                        "ask_yes_late": ask_yes_late["price"],
-                        "size": max(1.0, min(10.0, size_cap)),  # conservative default
+                        "token_id": f"{no_early_token}:{yes_late_token}",
+                        "early_id": pair['early_id'],
+                        "late_id": pair['late_id'],
+                        "no_early_token": no_early_token,
+                        "yes_late_token": yes_late_token,
+                        "ask_no_early": ask_no["price"],
+                        "ask_yes_late": ask_yes["price"],
+                        "size": min(10.0, ask_no.get("size", 0), ask_yes.get("size", 0)),
                         "total_cost": total_cost,
-                        "guaranteed_payoff": 1.0,
                         "expected_profit": expected_profit,
                         "annualized_roi": annualized_roi,
-                        "days_until_close": days_until_late,
-                        "token_id": f"{no_early}:{yes_late}",  # for tracking
+                        "early_question": early_m.get("question"),
+                        "late_question": late_m.get("question"),
+                        "llm_reason": pair.get("description", "")
                     })
-
-                if len(opportunities) >= self.max_pairs:
-                    break
 
         return opportunities
 
