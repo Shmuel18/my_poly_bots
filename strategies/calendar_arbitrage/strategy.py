@@ -83,12 +83,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
             dry_run=dry_run,
         )
 
-        # --- 1. הגדרות נתיבים וקבצים ---
+        # 1. קבצים וזיכרון (חובה להגדיר כאן כדי למנוע AttributeError)
         self.PAIRS_FILE = os.path.join("data", "discovered_pairs.json")
-        
-        # --- 2. הגדרות לוגיקה וסיבוב ---
         self.market_offset = 0
         self.llm_batch_size = 100
+        
+        # 2. הגדרות אסטרטגיה
         self.min_profit_threshold = float(min_profit_threshold)
         self.max_pairs = max_pairs
         self.estimated_fee = float(os.getenv("DEFAULT_SLIPPAGE", "0.01"))
@@ -100,10 +100,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.use_llm = use_llm
         self.llm_model = llm_model
 
-        # --- 3. טעינת זוגות שנשמרו בעבר ---
+        # 3. טעינת זוגות שנשמרו מהעבר
         self.discovered_pairs = self._load_discovered_pairs()
 
-        # --- 4. אתחול סוכנים ומנהלים ---
+        # 4. אתחול רכיבים (Embedding, LLM, WS)
         self._embedding_model = None
         self._embedding_cache = {}
         self._llm_agent = None
@@ -122,9 +122,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.use_database = use_database
         self.db = None
         
-        self.logger.info(f"✅ Initialized with {len(self.discovered_pairs)} saved pairs.")
+        self.logger.info(f"✅ Strategy Initialized | {len(self.discovered_pairs)} monitored pairs")
+
     def _load_discovered_pairs(self) -> List[Dict]:
-        """טעינת זוגות שנמצאו בעבר מהדיסק."""
+        """טעינת זוגות מהדיסק."""
         if os.path.exists(self.PAIRS_FILE):
             try:
                 with open(self.PAIRS_FILE, "r", encoding="utf-8") as f:
@@ -136,7 +137,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
         return []
 
     def _save_discovered_pairs(self):
-        """שמירת זוגות שנמצאו לדיסק."""
+        """שמירה לדיסק."""
         try:
             os.makedirs(os.path.dirname(self.PAIRS_FILE), exist_ok=True)
             with open(self.PAIRS_FILE, "w", encoding="utf-8") as f:
@@ -145,7 +146,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
             self.logger.error(f"❌ Failed to save discovered pairs: {e}")
 
     def _cleanup_expired_pairs(self, active_market_ids: set):
-        """מחיקת זוגות שהשווקים שלהם כבר לא קיימים בבורסה (Expired)."""
+        """ניקוי שווקים שנסגרו."""
         initial_count = len(self.discovered_pairs)
         self.discovered_pairs = [
             p for p in self.discovered_pairs 
@@ -429,111 +430,71 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
 
     async def scan(self) -> List[Dict[str, Any]]:
-        """סריקת שווקים: גילוי זוגות חדשים בסיבוב ומעקב אחרי קיימים."""
-        # 1. שליפת כל השווקים הפעילים (עד 5000)
         all_markets = self.scanner.get_all_active_markets(max_markets=5000)
         if not all_markets:
             return []
         
-        # יצירת מפות לחיפוש מהיר
         active_ids = {m['id'] for m in all_markets}
         market_map = {m['id']: m for m in all_markets}
 
-        # --- שלב א': Discovery (LLM Rotation) ---
+        # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
             start = self.market_offset
             end = min(start + self.llm_batch_size, len(all_markets))
             batch = all_markets[start:end]
             
-            self.logger.info(f"📦 Discovery Scan: Markets {start}-{end} / {len(all_markets)}")
+            self.logger.info(f"📦 Discovery: Markets {start}-{end} / {len(all_markets)}")
             try:
-                # קריאה ל-LLM לקבלת זוגות (משתמש ב-cluster_markets_debug שבנינו קודם)
                 new_pairs, raw_text = await self._llm_agent.cluster_markets_debug(batch)
                 
                 for b_early, b_late, reason in new_pairs:
-                    early_id = batch[b_early]['id']
-                    late_id = batch[b_late]['id']
-                    
-                    # הוספה רק אם הזוג באמת חדש
+                    early_id, late_id = batch[b_early]['id'], batch[b_late]['id']
                     if not any(p['early_id'] == early_id and p['late_id'] == late_id for p in self.discovered_pairs):
                         self.discovered_pairs.append({
                             "early_id": early_id,
                             "late_id": late_id,
                             "description": reason,
-                            "discovered_at": str(asyncio.get_event_loop().time())
+                            "early_question": batch[b_early]['question']
                         })
-                        self.logger.info(f"✨ Discovered pair: {batch[b_early]['question']}")
-                
+                        self.logger.info(f"✨ New logic: {batch[b_early]['question']}")
                 self._save_discovered_pairs()
             except Exception as e:
-                self.logger.error(f"❌ LLM Discovery failed: {e}")
+                self.logger.error(f"❌ LLM failed: {e}")
 
-            # עדכון ה-Offset לסריקה הבאה
             self.market_offset = end
             if self.market_offset >= len(all_markets):
                 self.market_offset = 0
-                self._cleanup_expired_pairs(active_ids)  # ניקוי זוגות ישנים בסיום סיבוב מלא
+                self._cleanup_expired_pairs(active_ids)
 
-        # --- שלב ב': Monitoring (בדיקת מחירים לכל הזוגות בזיכרון) ---
+        # --- Monitoring Phase ---
+        self.logger.info(f"📈 Checking prices for {len(self.discovered_pairs)} saved pairs...")
         opportunities = []
-        self.logger.info(f"📈 Checking prices for {len(self.discovered_pairs)} monitored pairs...")
-        
         for pair in self.discovered_pairs:
-            early_m = market_map.get(pair['early_id'])
-            late_m = market_map.get(pair['late_id'])
-            
-            if not early_m or not late_m:
-                continue
+            early, late = market_map.get(pair['early_id']), market_map.get(pair['late_id'])
+            if not early or not late: continue
 
-            # שליפת Token IDs
-            tid_early = self._get_token_ids(early_m)
-            tid_late = self._get_token_ids(late_m)
-            
-            if len(tid_early) < 2 or len(tid_late) < 2:
-                continue
+            tid_early, tid_late = self._get_token_ids(early), self._get_token_ids(late)
+            if len(tid_early) < 2 or len(tid_late) < 2: continue
 
-            # הגדרת אסימונים: NO במוקדם, YES במאוחר
-            no_early_token = tid_early[1] 
-            yes_late_token = tid_late[0]
+            no_early, yes_late = tid_early[1], tid_late[0]
+            ask_no, ask_yes = self._best_ask(no_early), self._best_ask(yes_late)
+            if not ask_no or not ask_yes: continue
 
-            # קבלת מחירי Ask
-            ask_no = self._best_ask(no_early_token)
-            ask_yes = self._best_ask(yes_late_token)
-
-            if not ask_no or not ask_yes:
-                continue
-
-            # חישוב רווח
             total_cost = ask_no["price"] + ask_yes["price"]
-            min_req = self.min_profit_threshold + (2 * self.estimated_fee)
-            
-            if total_cost < (1.0 - min_req):
-                # בדיקת סיכון "Invalid"
-                if self._has_invalid_risk(early_m) or self._has_invalid_risk(late_m):
-                    continue
-
-                expected_profit = 1.0 - total_cost
-                days = self._days_until_close(late_m.get("endDate"))
-                annualized_roi = self._calculate_annualized_roi(expected_profit, days)
-
-                if annualized_roi >= self.min_annualized_roi:
+            if total_cost < (1.0 - (self.min_profit_threshold + 2*self.estimated_fee)):
+                if self._has_invalid_risk(early) or self._has_invalid_risk(late): continue
+                
+                days = self._days_until_close(late.get("endDate"))
+                roi = self._calculate_annualized_roi(1.0 - total_cost, days)
+                if roi >= self.min_annualized_roi:
                     opportunities.append({
-                        "token_id": f"{no_early_token}:{yes_late_token}",
-                        "early_id": pair['early_id'],
-                        "late_id": pair['late_id'],
-                        "no_early_token": no_early_token,
-                        "yes_late_token": yes_late_token,
-                        "ask_no_early": ask_no["price"],
-                        "ask_yes_late": ask_yes["price"],
+                        "token_id": f"{no_early}:{yes_late}",
+                        "no_early_token": no_early, "yes_late_token": yes_late,
+                        "ask_no_early": ask_no["price"], "ask_yes_late": ask_yes["price"],
                         "size": min(10.0, ask_no.get("size", 0), ask_yes.get("size", 0)),
-                        "total_cost": total_cost,
-                        "expected_profit": expected_profit,
-                        "annualized_roi": annualized_roi,
-                        "early_question": early_m.get("question"),
-                        "late_question": late_m.get("question"),
-                        "llm_reason": pair.get("description", "")
+                        "annualized_roi": roi, "llm_reason": pair.get("description", ""),
+                        "early_question": early['question'], "late_question": late['question']
                     })
-
         return opportunities
 
     async def should_enter(self, opportunity: Dict[str, Any]) -> bool:
