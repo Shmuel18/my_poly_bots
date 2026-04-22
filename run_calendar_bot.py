@@ -86,6 +86,17 @@ Examples:
         help='Minimum LLM confidence that paired markets share resolution criteria (default: 0.9)'
     )
 
+    parser.add_argument(
+        '--early-exit-usd',
+        type=float,
+        default=0.20,
+        dest='early_exit_threshold',
+        help='Minimum USD profit per share-pair (after fees) to trigger early exit — '
+             'e.g. 0.20 means exit once the spread has closed enough that selling both legs '
+             'now nets ≥ 20¢ above entry cost. Lower = more aggressive exits, higher = more patient. '
+             '(default: 0.20)'
+    )
+
     # Human-in-the-loop tiered sizing
     parser.add_argument(
         '--probe-usd',
@@ -179,6 +190,7 @@ Examples:
         'max_pairs': args.max_pairs,
         'min_annualized_roi': args.min_annualized_roi,
         'min_resolution_match_confidence': args.min_resolution_confidence,
+        'early_exit_threshold': args.early_exit_threshold,
         'probe_usd': args.probe_usd,
         'confirmed_usd': args.confirmed_usd,
         'escalation_minutes': args.escalation_minutes,

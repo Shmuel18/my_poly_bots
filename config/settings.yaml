@@ -43,6 +43,10 @@ calendar_arbitrage:
   estimated_fee: 0.01                   # per-leg fee/slippage buffer
   min_resolution_match_confidence: 0.9  # LLM confidence that both markets resolve identically
   similarity_threshold: 0.85            # cosine similarity cutoff for embedding match
+  # Early exit: sell both legs once the spread has closed enough that selling now
+  # nets ≥ this many USD above entry cost. Captures profit early and rotates capital
+  # faster — often worth more than waiting for resolution in months.
+  early_exit_threshold: 0.20            # in USD per share-pair (0.20 = 20¢)
   # Human-in-the-loop tiered sizing (for $100 capital). Probe every new pair
   # small; escalate to Telegram after a persistent spread; scale up once user
   # approves in Telegram.

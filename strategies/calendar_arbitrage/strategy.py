@@ -65,7 +65,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
         min_profit_threshold: float = 0.01,
         max_pairs: int = 1000,
         dry_run: bool = False,
-        early_exit_threshold: float = 0.005,
+        early_exit_threshold: float = 0.20,
         min_annualized_roi: float = 0.15,
         check_invalid_risk: bool = True,
         use_embeddings: bool = True,
@@ -1186,6 +1186,19 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 
                 self.stats["trades_exited"] += 1
                 self.logger.info(f"✅ Successfully exited both legs (P&L: {pnl:.4f})")
+                # Notify Telegram so the user sees capital rotations in real time
+                if self.telegram and self.telegram.enabled:
+                    try:
+                        early_q = (position.get("early_question") or "")[:60]
+                        pnl_pct = (pnl / entry_cost * 100) if entry_cost else 0.0
+                        await self.telegram.send_notice(
+                            f"💰 Early exit @ ${pnl:+.4f} ({pnl_pct:+.1f}%)\n"
+                            f"   Early: {early_q}\n"
+                            f"   Exit value ${exit_value:.4f} vs entry ${entry_cost:.4f} "
+                            f"(size={size})"
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Telegram exit notice failed: {e}")
                 return True
             else:
                 # Log failures
