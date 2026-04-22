@@ -71,6 +71,45 @@ Examples:
         default=1000,
         help='Max pair groups to evaluate (default: 1000)'
     )
+
+    parser.add_argument(
+        '--min-annualized-roi',
+        type=float,
+        default=0.15,
+        help='Minimum annualized ROI to enter a trade (default: 0.15 = 15%%)'
+    )
+
+    parser.add_argument(
+        '--min-resolution-confidence',
+        type=float,
+        default=0.9,
+        help='Minimum LLM confidence that paired markets share resolution criteria (default: 0.9)'
+    )
+
+    # Human-in-the-loop tiered sizing
+    parser.add_argument(
+        '--probe-usd',
+        type=float,
+        default=5.0,
+        help='USD size for initial probe trades on newly discovered pairs (default: 5.0)'
+    )
+    parser.add_argument(
+        '--confirmed-usd',
+        type=float,
+        default=20.0,
+        help='USD size for user-confirmed pairs (default: 20.0)'
+    )
+    parser.add_argument(
+        '--escalation-minutes',
+        type=float,
+        default=30.0,
+        help='Minutes a probe position must persist before sending a Telegram alert (default: 30)'
+    )
+    parser.add_argument(
+        '--no-telegram',
+        action='store_true',
+        help='Disable Telegram notifier entirely (runs fully automated with probe sizing only)'
+    )
     
     # NLP/LLM options
     parser.add_argument(
@@ -83,13 +122,13 @@ Examples:
     parser.add_argument(
         '--use-llm',
         action='store_true',
-        help='Use LLM (GPT-4) for advanced semantic clustering (requires OPENAI_API_KEY)'
+        help='Use LLM for semantic market clustering (requires GEMINI_API_KEY)'
     )
-    
+
     parser.add_argument(
         '--llm-model',
-        default='gpt-4o-mini',
-        help='LLM model to use (default: gpt-4o-mini)'
+        default='gemini-2.0-flash',
+        help='Gemini model to use (default: gemini-2.0-flash)'
     )
     
     # Database options
@@ -138,6 +177,12 @@ Examples:
         'min_profit_threshold': args.profit,
         'scan_interval': args.scan_interval,
         'max_pairs': args.max_pairs,
+        'min_annualized_roi': args.min_annualized_roi,
+        'min_resolution_match_confidence': args.min_resolution_confidence,
+        'probe_usd': args.probe_usd,
+        'confirmed_usd': args.confirmed_usd,
+        'escalation_minutes': args.escalation_minutes,
+        'use_telegram': not args.no_telegram,
         'use_embeddings': args.use_embeddings,
         'use_llm': args.use_llm,
         'llm_model': args.llm_model,

@@ -73,6 +73,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
         use_llm: bool = True,
         llm_model: str = "gemini-2.0-flash",
         use_database: bool = False,
+        min_resolution_match_confidence: float = 0.9,
+        probe_usd: float = 5.0,
+        confirmed_usd: float = 20.0,
+        escalation_minutes: float = 30.0,
+        use_telegram: bool = True,
         **kwargs,
     ):
         super().__init__(
@@ -99,6 +104,28 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.similarity_threshold = float(similarity_threshold)
         self.use_llm = use_llm
         self.llm_model = llm_model
+        self.min_resolution_match_confidence = float(min_resolution_match_confidence)
+
+        # Human-in-the-loop tiered sizing
+        self.probe_usd = float(probe_usd)
+        self.confirmed_usd = float(confirmed_usd)
+        self.escalation_seconds = float(escalation_minutes) * 60.0
+        self.CONFIRMED_FILE = os.path.join("data", "confirmed_pairs.json")
+        self.PENDING_FILE = os.path.join("data", "pending_confirmation.json")
+        self.REJECTED_FILE = os.path.join("data", "rejected_pairs.json")
+        self.confirmed_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.CONFIRMED_FILE)
+        self.pending_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.PENDING_FILE)
+        self.rejected_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.REJECTED_FILE)
+
+        # Telegram notifier (no-op if TELEGRAM_BOT_TOKEN / CHAT_ID not set)
+        self.telegram = None
+        if use_telegram:
+            try:
+                from utils.telegram_notifier import TelegramNotifier
+                self.telegram = TelegramNotifier()
+            except Exception as e:
+                self.logger.warning(f"Telegram init failed: {e}")
+                self.telegram = None
 
         # 3. טעינת זוגות שנשמרו מהעבר
         self.discovered_pairs = self._load_discovered_pairs()
@@ -144,6 +171,54 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 json.dump(self.discovered_pairs, f, ensure_ascii=False, indent=2)
         except Exception as e:
             self.logger.error(f"❌ Failed to save discovered pairs: {e}")
+
+    def _load_json_state(self, path: str) -> Dict[str, Any]:
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, dict) else {}
+        except Exception as e:
+            self.logger.warning(f"Failed to load {path}: {e}")
+            return {}
+
+    def _save_json_state(self, path: str, data: Dict[str, Any]):
+        try:
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self.logger.error(f"Failed to save {path}: {e}")
+
+    @staticmethod
+    def _pair_key(early_id: str, late_id: str) -> str:
+        """Stable key regardless of insertion order."""
+        a, b = sorted((str(early_id), str(late_id)))
+        return f"{a[:12]}__{b[:12]}"
+
+    def _get_tier_status(self, early_id: str, late_id: str) -> str:
+        """Returns one of: 'rejected', 'confirmed', 'pending', 'probe'."""
+        key = self._pair_key(early_id, late_id)
+        if key in self.rejected_pairs:
+            return "rejected"
+        if key in self.confirmed_pairs:
+            return "confirmed"
+        if key in self.pending_pairs:
+            return "pending"
+        return "probe"
+
+    def _size_for_tier(self, tier: str, combined_ask: float) -> float:
+        """Convert tier label + combined ask price into shares."""
+        if tier == "confirmed":
+            usd = self.confirmed_usd
+        elif tier == "probe":
+            usd = self.probe_usd
+        else:
+            return 0.0  # pending / rejected → no new position
+        if combined_ask <= 0:
+            return 0.0
+        return max(1.0, round(usd / combined_ask, 2))
 
     def _cleanup_expired_pairs(self, active_market_ids: set):
         """ניקוי שווקים שנסגרו."""
@@ -294,18 +369,52 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # Simplified: annualized_profit = profit * (365 / days)
         return profit * (365.0 / days_until_close)
 
+    def _parse_end_date(self, end_date_str: Optional[str]):
+        """Parse endDate string to timezone-aware datetime. Returns None on failure."""
+        if not end_date_str:
+            return None
+        try:
+            from datetime import datetime
+            return datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
+        except Exception:
+            return None
+
     def _days_until_close(self, end_date_str: Optional[str]) -> float:
         """חישוב ימים עד סגירת השוק."""
-        if not end_date_str:
+        end_date = self._parse_end_date(end_date_str)
+        if end_date is None:
             return 365.0  # default fallback
         try:
             from datetime import datetime, timezone
-            end_date = datetime.fromisoformat(end_date_str.replace("Z", "+00:00"))
             now = datetime.now(timezone.utc)
             delta = (end_date - now).total_seconds() / 86400  # days
             return max(0.1, delta)  # minimum 0.1 day
-        except:
+        except Exception:
             return 365.0
+
+    def _validate_temporal_containment(self, early: Dict, late: Dict) -> bool:
+        """Strict validation: early.endDate must be strictly earlier than late.endDate.
+
+        This guards against false calendar-arb pairs where the LLM groups two markets
+        as same-event but their actual deadlines don't satisfy the "early ⊂ late"
+        containment property. Without this, we could buy a "guaranteed" arbitrage
+        that isn't guaranteed at all."""
+        early_end = self._parse_end_date(early.get("endDate"))
+        late_end = self._parse_end_date(late.get("endDate"))
+        if early_end is None or late_end is None:
+            self.logger.debug(
+                f"Rejected pair: missing endDate (early={early.get('endDate')}, late={late.get('endDate')})"
+            )
+            return False
+        if early_end > late_end:
+            self.logger.warning(
+                f"❌ Temporal violation: early {early_end.isoformat()} > late {late_end.isoformat()} "
+                f"('{early.get('question', '')[:40]}' vs '{late.get('question', '')[:40]}')"
+            )
+            return False
+        if early_end == late_end:
+            return False
+        return True
     
     def _cluster_markets_by_embeddings(self, markets: List[Dict]) -> List[List[Dict]]:
         """Build groups using semantic similarity (embeddings)."""
@@ -433,9 +542,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
         all_markets = self.scanner.get_all_active_markets(max_markets=5000)
         if not all_markets:
             return []
-        
+
+        # Cache the market_map for use by _check_escalations without re-fetching.
         active_ids = {m['id'] for m in all_markets}
         market_map = {m['id']: m for m in all_markets}
+        # Cache for _check_escalations (avoids a second scanner fetch).
+        self._last_market_map = market_map
 
         # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
@@ -445,18 +557,31 @@ class CalendarArbitrageStrategy(BaseStrategy):
             
             self.logger.info(f"📦 Discovery: Markets {start}-{end} / {len(all_markets)}")
             try:
-                new_pairs, raw_text = await self._llm_agent.cluster_markets_debug(batch)
-                
-                for b_early, b_late, reason in new_pairs:
+                new_pairs, raw_text = await self._llm_agent.cluster_markets_debug(
+                    batch,
+                    min_resolution_confidence=self.min_resolution_match_confidence,
+                )
+
+                existing_keys = {
+                    tuple(sorted((p.get('early_id', ''), p.get('late_id', ''))))
+                    for p in self.discovered_pairs
+                }
+                for b_early, b_late, reason, confidence in new_pairs:
                     early_id, late_id = batch[b_early]['id'], batch[b_late]['id']
-                    if not any(p['early_id'] == early_id and p['late_id'] == late_id for p in self.discovered_pairs):
-                        self.discovered_pairs.append({
-                            "early_id": early_id,
-                            "late_id": late_id,
-                            "description": reason,
-                            "early_question": batch[b_early]['question']
-                        })
-                        self.logger.info(f"✨ New logic: {batch[b_early]['question']}")
+                    pair_key = tuple(sorted((early_id, late_id)))
+                    if pair_key in existing_keys:
+                        continue
+                    existing_keys.add(pair_key)
+                    self.discovered_pairs.append({
+                        "early_id": early_id,
+                        "late_id": late_id,
+                        "description": reason,
+                        "early_question": batch[b_early]['question'],
+                        "resolution_match_confidence": confidence,
+                    })
+                    self.logger.info(
+                        f"✨ New pair (conf={confidence:.2f}): {batch[b_early]['question']}"
+                    )
                 self._save_discovered_pairs()
             except Exception as e:
                 self.logger.error(f"❌ LLM failed: {e}")
@@ -473,6 +598,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
             early, late = market_map.get(pair['early_id']), market_map.get(pair['late_id'])
             if not early or not late: continue
 
+            if not self._validate_temporal_containment(early, late):
+                continue
+
             tid_early, tid_late = self._get_token_ids(early), self._get_token_ids(late)
             if len(tid_early) < 2 or len(tid_late) < 2: continue
 
@@ -487,11 +615,31 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 days = self._days_until_close(late.get("endDate"))
                 roi = self._calculate_annualized_roi(1.0 - total_cost, days)
                 if roi >= self.min_annualized_roi:
+                    tier = self._get_tier_status(pair['early_id'], pair['late_id'])
+                    if tier == "rejected":
+                        continue  # user-blacklisted
+                    if tier == "pending":
+                        continue  # awaiting user reply → don't add more positions
+                    # Tier is "probe" or "confirmed" — size accordingly
+                    desired_size = self._size_for_tier(tier, total_cost)
+                    # Cap by orderbook depth
+                    max_book_size = min(ask_no.get("size", 0), ask_yes.get("size", 0))
+                    size = min(desired_size, max_book_size)
+                    if size <= 0:
+                        continue
                     opportunities.append({
                         "token_id": f"{no_early}:{yes_late}",
                         "no_early_token": no_early, "yes_late_token": yes_late,
                         "ask_no_early": ask_no["price"], "ask_yes_late": ask_yes["price"],
-                        "size": min(10.0, ask_no.get("size", 0), ask_yes.get("size", 0)),
+                        "total_cost": total_cost,
+                        "days_until_close": days,
+                        "size": size,
+                        "tier": tier,
+                        "pair_key": self._pair_key(pair['early_id'], pair['late_id']),
+                        "early_id": pair['early_id'], "late_id": pair['late_id'],
+                        "early_desc": early.get("description", ""),
+                        "late_desc": late.get("description", ""),
+                        "early_end": early.get("endDate"), "late_end": late.get("endDate"),
                         "annualized_roi": roi, "llm_reason": pair.get("description", ""),
                         "early_question": early['question'], "late_question": late['question']
                     })
@@ -500,6 +648,50 @@ class CalendarArbitrageStrategy(BaseStrategy):
     async def should_enter(self, opportunity: Dict[str, Any]) -> bool:
         # Basic sanity + we already used orderbook asks, so thresholds are conservative
         return True
+
+    async def _emergency_sell(self, token_id: str, size: float) -> bool:
+        """Best-effort rollback: sell `size` of `token_id` using aggressive IOC orders.
+
+        Walks the bid book via _simulate_fill to pick a limit that should fully
+        fill, then submits IOC so unmatched size cancels instead of lingering as
+        a stale limit order. Retries twice at progressively lower prices if the
+        first attempt doesn't fully fill."""
+        attempts = []
+        for price_floor_ratio in (0.95, 0.70, 0.30):
+            sim = self._simulate_fill(token_id, "SELL", size)
+            if sim and sim.get("avg_price"):
+                # Use the worst price needed to fill the size, with safety buffer below
+                limit_price = max(0.01, float(sim["avg_price"]) * price_floor_ratio)
+            else:
+                bid = self._best_bid(token_id)
+                limit_price = max(0.01, float(bid["price"]) * price_floor_ratio) if bid else 0.01
+
+            attempts.append(limit_price)
+            try:
+                result = await self.executor.execute_trade(
+                    token_id=token_id, side="SELL", size=size, price=limit_price, order_type="IOC"
+                )
+            except Exception as e:
+                self.logger.error(f"🚨 Rollback attempt exception (price={limit_price:.4f}): {e}")
+                continue
+
+            if result and result.get("success"):
+                filled = float(result.get("sizeFilled", 0))
+                if filled >= size * 0.99:
+                    self.logger.info(f"✅ Rollback filled: {filled:.2f}/{size:.2f} @ ${limit_price:.4f}")
+                    return True
+                self.logger.warning(
+                    f"⚠️ Partial rollback: {filled:.2f}/{size:.2f} @ ${limit_price:.4f} — retrying lower"
+                )
+                size -= filled  # reduce remaining size for next attempt
+                if size <= 0:
+                    return True
+
+        self.logger.critical(
+            f"🚨 ROLLBACK EXHAUSTED for {token_id[:12]} — tried prices {attempts}. "
+            f"MANUAL INTERVENTION REQUIRED: hold {size:.2f} units open."
+        )
+        return False
 
     async def enter_position(self, opportunity: Dict[str, Any]) -> bool:
         """ביצוע שתי העסקאות במקביל: קניית NO במוקדם ו-YES במאוחר עם טיפול בסיכון רגליים."""
@@ -512,92 +704,130 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # Simulate fills for slippage protection
         fill_no = self._simulate_fill(no_early_token, "BUY", size)
         fill_yes = self._simulate_fill(yes_late_token, "BUY", size)
-        
+
         # Check if we can actually fill both legs
         if not fill_no or not fill_yes:
             self.logger.warning("⚠️ Cannot simulate fills - insufficient orderbook data")
             return False
-        
+
         if not fill_no.get("fully_filled") or not fill_yes.get("fully_filled"):
             self.logger.warning(
                 f"⚠️ Insufficient liquidity: NO={fill_no.get('filled_size'):.1f}/{size:.1f}, "
                 f"YES={fill_yes.get('filled_size'):.1f}/{size:.1f}"
             )
             return False
-        
-        # Calculate total cost with slippage
+
+        # Calculate total cost with slippage. Include a buffer for exit-side slippage
+        # in case we ever early-exit instead of holding to resolution.
         total_cost_with_slippage = fill_no["avg_price"] + fill_yes["avg_price"]
-        min_profit_total = self.min_profit_threshold + (2 * self.estimated_fee)
-        
+        min_profit_total = self.min_profit_threshold + (4 * self.estimated_fee)  # 2 entry + 2 exit legs
+
         if total_cost_with_slippage >= (1.0 - min_profit_total):
             self.logger.warning(
-                f"⚠️ Slippage kills profit: ${total_cost_with_slippage:.4f} >= ${1.0 - min_profit_total:.4f}"
+                f"⚠️ Slippage kills profit: ${total_cost_with_slippage:.4f} >= ${1.0 - min_profit_total:.4f} "
+                f"(threshold now includes exit-leg buffer)"
             )
             return False
 
-        self.logger.info("🧮 Calendar Arbitrage Opportunity:")
+        # CRITICAL: pre-trade balance check. Prevents submitting the first leg and
+        # then discovering we can't afford the second.
+        required_usdc = (fill_no["avg_price"] + fill_yes["avg_price"]) * size
+        try:
+            balance = await self.executor.get_balance()
+        except Exception as e:
+            self.logger.error(f"⚠️ Balance check failed, refusing to trade: {e}")
+            return False
+        # Keep a small buffer for rounding/fees on the exchange side.
+        if balance < required_usdc * 1.02:
+            self.logger.warning(
+                f"⚠️ Insufficient USDC: balance=${balance:.2f} < required=${required_usdc * 1.02:.2f} "
+                f"(size={size}, combined_ask=${(fill_no['avg_price'] + fill_yes['avg_price']):.4f})"
+            )
+            return False
+
+        tier = opportunity.get("tier", "probe")
+        self.logger.info(f"🧮 Calendar Arbitrage Opportunity [tier={tier.upper()}]:")
         self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} (avg: ${fill_no['avg_price']:.4f})")
         self.logger.info(f"   Late(YES) ask: ${price_yes_late:.4f} (avg: ${fill_yes['avg_price']:.4f})")
         self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | With slippage: ${total_cost_with_slippage:.4f}")
         self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
+        self.logger.info(f"   Balance: ${balance:.2f} | Required: ${required_usdc:.2f} | Size: {size}")
         self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
         self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
 
-        # Execute both legs concurrently
+        # Execute both legs concurrently. FOK (Fill-Or-Kill) guarantees all-or-nothing
+        # per leg at the limit price — no partial fills, no lingering limit orders.
         tasks = [
-            self.executor.execute_trade(token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"]),
-            self.executor.execute_trade(token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"]),
+            self.executor.execute_trade(
+                token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"], order_type="FOK"
+            ),
+            self.executor.execute_trade(
+                token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"], order_type="FOK"
+            ),
         ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        # Check results
-        no_early_success = isinstance(results[0], dict) and results[0].get("success")
-        yes_late_success = isinstance(results[1], dict) and results[1].get("success")
-        
-        # Handle leg risk - rollback if partial fill
+
+        # Check both success flag AND filled size to guard against brokers that
+        # return success on partial fills.
+        def leg_ok(res, expected_size):
+            if not isinstance(res, dict) or not res.get("success"):
+                return False
+            filled = float(res.get("sizeFilled", 0))
+            return filled >= expected_size * 0.99
+
+        no_early_success = leg_ok(results[0], size)
+        yes_late_success = leg_ok(results[1], size)
+
+        # Handle leg risk - rollback via _emergency_sell which uses IOC + price ladder
         if no_early_success and not yes_late_success:
-            self.logger.error("❌ YES leg failed, rolling back NO position")
-            try:
-                rollback = await self.executor.execute_trade(
-                    token_id=no_early_token, side="SELL", size=size, price=0.01
-                )
-                if rollback and rollback.get("success"):
-                    self.logger.info("✅ Rollback successful")
-                else:
-                    self.logger.error("🚨 ROLLBACK FAILED - manual intervention required!")
-            except Exception as e:
-                self.logger.error(f"🚨 Rollback exception: {e}")
+            self.logger.error("❌ YES leg failed or partial — rolling back NO position")
+            await self._emergency_sell(no_early_token, size)
             return False
-        
+
         elif yes_late_success and not no_early_success:
-            self.logger.error("❌ NO leg failed, rolling back YES position")
-            try:
-                rollback = await self.executor.execute_trade(
-                    token_id=yes_late_token, side="SELL", size=size, price=0.01
-                )
-                if rollback and rollback.get("success"):
-                    self.logger.info("✅ Rollback successful")
-                else:
-                    self.logger.error("🚨 ROLLBACK FAILED - manual intervention required!")
-            except Exception as e:
-                self.logger.error(f"🚨 Rollback exception: {e}")
+            self.logger.error("❌ NO leg failed or partial — rolling back YES position")
+            await self._emergency_sell(yes_late_token, size)
             return False
-        
+
         elif not no_early_success and not yes_late_success:
-            self.logger.error("❌ Both legs failed")
+            self.logger.error("❌ Both legs failed (or partially filled)")
+            # Defensive: even if success=False, some brokers may have filled partially.
+            for res, tok in ((results[0], no_early_token), (results[1], yes_late_token)):
+                if isinstance(res, dict) and float(res.get("sizeFilled", 0)) > 0:
+                    self.logger.warning(f"   Partial fill detected on {tok[:12]} — emergency-selling")
+                    await self._emergency_sell(tok, float(res["sizeFilled"]))
             return False
         
         # Both succeeded
+        import time as _time
+        entry_wall_time = _time.time()
         group_id = f"CAL-{no_early_token[:6]}-{yes_late_token[:6]}"
         pos_data = {
             **opportunity,
             "entry_time": asyncio.get_event_loop().time(),
+            "entry_wall_time": entry_wall_time,
             "size": size,
             "strategy_name": self.strategy_name,
             "group_id": group_id,
             "actual_entry_cost": total_cost_with_slippage,  # Track actual cost
         }
+
+        # Tier bookkeeping — if this was a probe entry, track it for escalation.
+        pair_key = opportunity.get("pair_key")
+        if pair_key and tier == "probe":
+            self.pending_pairs.setdefault(pair_key, {
+                "opened_at": entry_wall_time,
+                "alerted": False,
+                "early_id": opportunity.get("early_id"),
+                "late_id": opportunity.get("late_id"),
+                "early_question": opportunity.get("early_question"),
+                "late_question": opportunity.get("late_question"),
+                "probe_size": size,
+                "probe_cost": total_cost_with_slippage,
+            })
+            self._save_json_state(self.PENDING_FILE, self.pending_pairs)
+            self.logger.info(f"🧪 Probe opened for pair_key={pair_key} (escalation in {self.escalation_seconds/60:.0f} min)")
         
         # Save to database if enabled
         if self.use_database and self.db:
@@ -734,27 +964,46 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 expected_pnl = exit_value - entry_cost - (2 * self.estimated_fee)
                 self.logger.info(f"   Expected exit: ${exit_value:.4f} | P&L: ${expected_pnl:.4f}")
 
-            # Execute SELL orders for both legs concurrently
-            # Using market orders (price=0.01 for SELL means accept any bid)
+            # Execute SELL orders for both legs concurrently using IOC so unmatched
+            # size cancels instead of lingering. Limit price uses simulated fill
+            # (worst bid required to clear our size) — if book thins during the RTT
+            # we fall back to _emergency_sell for each unfilled leg.
+            sim_no = self._simulate_fill(no_early_token, "SELL", size)
+            sim_yes = self._simulate_fill(yes_late_token, "SELL", size)
+            no_price = (sim_no["avg_price"] if sim_no else (bid_no["price"] if bid_no else 0.01))
+            yes_price = (sim_yes["avg_price"] if sim_yes else (bid_yes["price"] if bid_yes else 0.01))
             tasks = [
                 self.executor.execute_trade(
-                    token_id=no_early_token, 
-                    side="SELL", 
-                    size=size, 
-                    price=bid_no["price"] if bid_no else 0.01
+                    token_id=no_early_token, side="SELL", size=size, price=no_price, order_type="IOC"
                 ),
                 self.executor.execute_trade(
-                    token_id=yes_late_token, 
-                    side="SELL", 
-                    size=size, 
-                    price=bid_yes["price"] if bid_yes else 0.01
+                    token_id=yes_late_token, side="SELL", size=size, price=yes_price, order_type="IOC"
                 ),
             ]
 
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
-            # Check if both orders succeeded
-            if all(not isinstance(r, Exception) and r.get("success") for r in results):
+            def _leg_fully_filled(res, expected):
+                return (
+                    isinstance(res, dict)
+                    and res.get("success")
+                    and float(res.get("sizeFilled", 0)) >= expected * 0.99
+                )
+
+            no_ok = _leg_fully_filled(results[0], size)
+            yes_ok = _leg_fully_filled(results[1], size)
+
+            # If either leg failed to fully close, escalate via _emergency_sell.
+            if not no_ok:
+                filled = float(results[0].get("sizeFilled", 0)) if isinstance(results[0], dict) else 0
+                self.logger.warning(f"⚠️ NO exit partial ({filled:.2f}/{size:.2f}) — escalating")
+                await self._emergency_sell(no_early_token, size - filled)
+            if not yes_ok:
+                filled = float(results[1].get("sizeFilled", 0)) if isinstance(results[1], dict) else 0
+                self.logger.warning(f"⚠️ YES exit partial ({filled:.2f}/{size:.2f}) — escalating")
+                await self._emergency_sell(yes_late_token, size - filled)
+
+            if no_ok and yes_ok:
                 # Calculate P&L
                 exit_value = (bid_no["price"] if bid_no else 0) + (bid_yes["price"] if bid_yes else 0)
                 pnl = exit_value - entry_cost - (2 * self.estimated_fee)
@@ -824,6 +1073,96 @@ class CalendarArbitrageStrategy(BaseStrategy):
             self.logger.error(f"Error during exit execution: {e}")
             return False
     
+    async def _check_escalations(self, market_map: Dict[str, Dict]):
+        """For each pending (probe) pair, if older than escalation_seconds and
+        the spread is still exploitable, send a Telegram alert for human review."""
+        if not self.telegram or not self.telegram.enabled:
+            return
+        import time as _time
+        now = _time.time()
+        changed = False
+        for pair_key, state in list(self.pending_pairs.items()):
+            if state.get("alerted"):
+                continue
+            opened_at = state.get("opened_at", now)
+            if now - opened_at < self.escalation_seconds:
+                continue
+
+            early_id = state.get("early_id")
+            late_id = state.get("late_id")
+            early = market_map.get(early_id)
+            late = market_map.get(late_id)
+            if not early or not late:
+                self.logger.warning(f"Pending pair {pair_key} missing markets — dropping")
+                self.pending_pairs.pop(pair_key, None)
+                changed = True
+                continue
+
+            tid_early = self._get_token_ids(early)
+            tid_late = self._get_token_ids(late)
+            if len(tid_early) < 2 or len(tid_late) < 2:
+                continue
+            ask_no = self._best_ask(tid_early[1])
+            ask_yes = self._best_ask(tid_late[0])
+            if not ask_no or not ask_yes:
+                continue
+            total_cost = ask_no["price"] + ask_yes["price"]
+            days = self._days_until_close(late.get("endDate"))
+            roi = self._calculate_annualized_roi(1.0 - total_cost, days)
+
+            alert_info = {
+                "early_question": early.get("question", ""),
+                "late_question": late.get("question", ""),
+                "early_desc": early.get("description", ""),
+                "late_desc": late.get("description", ""),
+                "early_end": early.get("endDate"),
+                "late_end": late.get("endDate"),
+                "ask_no_early": ask_no["price"],
+                "ask_yes_late": ask_yes["price"],
+                "total_cost": total_cost,
+                "annualized_roi": roi,
+            }
+            ok = await self.telegram.send_pair_alert(pair_key, alert_info)
+            if ok:
+                state["alerted"] = True
+                state["alerted_at"] = now
+                changed = True
+                self.logger.info(f"📨 Telegram alert sent for pair_key={pair_key}")
+        if changed:
+            self._save_json_state(self.PENDING_FILE, self.pending_pairs)
+
+    async def _process_telegram_replies(self):
+        """Pull user decisions from Telegram and update confirmed/rejected state."""
+        if not self.telegram or not self.telegram.enabled:
+            return
+        replies = await self.telegram.poll_replies()
+        if not replies:
+            return
+        import time as _time
+        now = _time.time()
+        for reply in replies:
+            state = self.pending_pairs.pop(reply.pair_key, None)
+            if not state:
+                self.logger.warning(f"Got Telegram reply for unknown pair_key={reply.pair_key}")
+                continue
+            if reply.decision == "approve":
+                self.confirmed_pairs[reply.pair_key] = {
+                    **state,
+                    "confirmed_at": now,
+                    "confirmed_by_user": reply.user_id,
+                }
+                self.logger.info(f"✅ Pair CONFIRMED by user: {reply.pair_key}")
+            else:
+                self.rejected_pairs[reply.pair_key] = {
+                    **state,
+                    "rejected_at": now,
+                    "rejected_by_user": reply.user_id,
+                }
+                self.logger.info(f"❌ Pair REJECTED by user: {reply.pair_key}")
+        self._save_json_state(self.PENDING_FILE, self.pending_pairs)
+        self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+        self._save_json_state(self.REJECTED_FILE, self.rejected_pairs)
+
     async def _on_websocket_price_update(self, token_id: str, prices: Dict[str, float]):
         """WebSocket callback: triggered on sub-second price updates.
         
@@ -846,7 +1185,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
             if should_exit:
                 self.logger.info(f"🔴 WebSocket early exit triggered for {no_early_token} <-> {yes_late_token}")
                 # Schedule exit (fire and forget to avoid blocking price stream)
-                asyncio.create_task(self.exit_position(no_early_token, yes_late_token))
+                asyncio.create_task(self.exit_position(no_early_token))
     
     async def run(self):
         """Main strategy loop: scan for opportunities and monitor for early exits with real-time WebSocket."""
@@ -884,22 +1223,23 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     
                     # Full market scan
                     opportunities = await self.scan()
-                    
+
+                    # Human-in-the-loop: poll for user Telegram replies, then
+                    # check if any probes need escalation. Both are cheap; run
+                    # every loop.
+                    await self._process_telegram_replies()
+                    await self._check_escalations(getattr(self, "_last_market_map", {}))
+
                     if opportunities:
                         self.logger.info(f"\n✨ Found {len(opportunities)} opportunity/opportunities:")
                         for idx, opp in enumerate(opportunities[:self.max_pairs], 1):
-                            self.logger.info(f"\n  {idx}. NO_early: {opp['no_early_q']} (ask: {opp['no_early_ask']:.3f})")
-                            self.logger.info(f"     YES_late: {opp['yes_late_q']} (ask: {opp['yes_late_ask']:.3f})")
+                            self.logger.info(f"\n  {idx}. [{opp.get('tier','probe').upper()}] NO_early: {opp['early_question']} (ask: {opp['ask_no_early']:.3f})")
+                            self.logger.info(f"     YES_late: {opp['late_question']} (ask: {opp['ask_yes_late']:.3f})")
+                            self.logger.info(f"     Total cost: ${opp.get('total_cost', 0):.4f}")
                             self.logger.info(f"     ROI (annualized): {opp.get('annualized_roi', 0):.1%}")
-                            self.logger.info(f"     Max slippage: {opp.get('max_slippage', 0):.1%}")
-                            
+
                             # Try to enter position
-                            entered = await self.enter_position(
-                                opp["no_early_token"],
-                                opp["yes_late_token"],
-                                opp["no_early_ask"],
-                                opp["yes_late_ask"],
-                            )
+                            entered = await self.enter_position(opp)
                             if entered:
                                 break  # Enter one position per scan
                     else:

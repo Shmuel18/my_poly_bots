@@ -13,7 +13,7 @@ import json
 import logging
 from typing import List, Optional, Type
 
-from dotenv import dotenv_values
+from dotenv import dotenv_values, load_dotenv
 
 from utils import setup_logging
 from utils.dynamic_loader import load_class
@@ -23,6 +23,9 @@ def load_connection_from_env(env_path: Optional[str], dry_run: bool = False):
     """Load credentials from an .env file and create a connection."""
     if env_path:
         creds = dotenv_values(env_path)
+        # Also inject into os.environ so modules that read via os.getenv()
+        # (e.g. LLM agent reading GEMINI_API_KEY) see the variables.
+        load_dotenv(env_path, override=False)
     else:
         creds = {}
     # Lazy import to avoid heavy core import when running --help

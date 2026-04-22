@@ -49,7 +49,8 @@ class CalendarArbitrageLLMAgent:
         self,
         markets: List[Dict[str, Any]],
         max_clusters: int = 50,
-    ) -> Tuple[List[Tuple[int, int, str]], str]:
+        min_resolution_confidence: float = 0.9,
+    ) -> Tuple[List[Tuple[int, int, str, float]], str]:
         """
         Like cluster_markets, but returns (clusters, raw_llm_text) for debugging/logging.
         """
@@ -89,16 +90,28 @@ class CalendarArbitrageLLMAgent:
                 return [], text
 
             clusters = parsed.get("clusters", []) or []
-            result: List[Tuple[int, int, str]] = []
+            result: List[Tuple[int, int, str, float]] = []
+            rejected_low_confidence = 0
 
             for c in clusters[:max_clusters]:
                 early = c.get("early_market_index")
                 late = c.get("late_market_index")
-                if isinstance(early, int) and isinstance(late, int):
-                    # Convert 1-based index from LLM to 0-based for Python
-                    result.append((early - 1, late - 1, str(c.get("reasoning", ""))))
+                if not (isinstance(early, int) and isinstance(late, int)):
+                    continue
+                try:
+                    confidence = float(c.get("resolution_match_confidence", 0.0))
+                except (TypeError, ValueError):
+                    confidence = 0.0
+                if confidence < min_resolution_confidence:
+                    rejected_low_confidence += 1
+                    continue
+                # Convert 1-based index from LLM to 0-based for Python
+                result.append((early - 1, late - 1, str(c.get("reasoning", "")), confidence))
 
-            logger.info(f"🤖 LLM found {len(result)} potential arbitrage pairs")
+            logger.info(
+                f"🤖 LLM found {len(result)} valid pairs "
+                f"({rejected_low_confidence} rejected: resolution_match_confidence < {min_resolution_confidence})"
+            )
             return result, text
 
         except Exception as e:
@@ -109,20 +122,34 @@ class CalendarArbitrageLLMAgent:
         self,
         markets: List[Dict[str, Any]],
         max_clusters: int = 50,
-    ) -> List[Tuple[int, int, str]]:
-        clusters, _ = await self.cluster_markets_debug(markets, max_clusters)
+        min_resolution_confidence: float = 0.9,
+    ) -> List[Tuple[int, int, str, float]]:
+        clusters, _ = await self.cluster_markets_debug(markets, max_clusters, min_resolution_confidence)
         return clusters
 
     def _build_clustering_prompt(self, markets: List[Dict[str, Any]]) -> str:
         market_descriptions = []
         for idx, market in enumerate(markets):
             question = market.get("question", "Unknown")
-            end_date = market.get("end_date_iso", "Unknown")
-            market_descriptions.append(f"{idx+1}. \"{question}\" (expires: {end_date})")
+            end_date = market.get("end_date_iso") or market.get("endDate") or "Unknown"
+            desc = (market.get("description") or "").strip().replace("\n", " ")[:500]
+            if desc:
+                market_descriptions.append(
+                    f"{idx+1}. \"{question}\" (expires: {end_date})\n   Resolution: {desc}"
+                )
+            else:
+                market_descriptions.append(f"{idx+1}. \"{question}\" (expires: {end_date})")
 
         return f"""You are an expert in prediction market arbitrage.
 Identify pairs of markets that describe the SAME underlying event but with DIFFERENT expiries.
-The early expiry must be a logical SUBSET of the late expiry.
+
+CRITICAL REQUIREMENTS for a valid pair:
+1. The early expiry must be a logical SUBSET of the late expiry (same event, earlier deadline).
+2. The RESOLUTION CRITERIA must be IDENTICAL — same source, same definition of the event.
+   If one market resolves based on "official statement" and the other on "media report", REJECT.
+   If the event definition differs even slightly (e.g. "attack" vs "military operation"), REJECT.
+   If the entities, thresholds, or conditions differ, REJECT.
+3. Score your confidence that the resolution criteria match as a float in [0.0, 1.0].
 
 Markets:
 {chr(10).join(market_descriptions)}
@@ -134,10 +161,13 @@ Return ONLY valid JSON in this exact format:
       "event_description": "short description",
       "early_market_index": 1,
       "late_market_index": 3,
-      "reasoning": "why"
+      "resolution_match_confidence": 0.95,
+      "reasoning": "why this is a valid pair AND why resolution criteria match"
     }}
   ]
-}}"""
+}}
+
+Only include clusters where resolution_match_confidence >= 0.9. When in doubt, REJECT."""
 
     @staticmethod
     def _extract_text(resp_json: Dict[str, Any]) -> str:
