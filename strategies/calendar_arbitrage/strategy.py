@@ -449,15 +449,42 @@ class CalendarArbitrageStrategy(BaseStrategy):
         
         return groups
 
+    @staticmethod
+    def _orderbook_side(book, side: str):
+        """py-clob-client returns OrderBookSummary (dataclass with .asks/.bids,
+        each entry an OrderSummary with .price/.size). Older code assumed a
+        dict. Accept either shape defensively."""
+        if not book:
+            return []
+        if hasattr(book, side):
+            return getattr(book, side) or []
+        if hasattr(book, "get"):
+            return book.get(side, []) or []
+        return []
+
+    @staticmethod
+    def _orderbook_entry(e):
+        """Return (price, size) floats from either an OrderSummary dataclass
+        or a {price, size} dict."""
+        if e is None:
+            return None, None
+        p = getattr(e, "price", None) if not isinstance(e, dict) else e.get("price")
+        s = getattr(e, "size", None) if not isinstance(e, dict) else e.get("size")
+        try:
+            return float(p), float(s) if s is not None else 0.0
+        except (TypeError, ValueError):
+            return None, None
+
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
         try:
             book = self.executor.client.get_order_book(token_id)
-            asks = book.get("asks", []) if book else []
+            asks = self._orderbook_side(book, "asks")
             if asks:
-                p = float(asks[0].get("price", 0))
-                s = float(asks[0].get("size", 0)) if asks[0].get("size") is not None else 0.0
-                return {"price": p, "size": s}
-        except Exception:
+                p, s = self._orderbook_entry(asks[0])
+                if p is not None:
+                    return {"price": p, "size": s or 0.0}
+        except Exception as e:
+            self.logger.debug(f"_best_ask failed for {token_id[:12]}: {e}")
             return None
         return None
 
@@ -465,12 +492,13 @@ class CalendarArbitrageStrategy(BaseStrategy):
         """Get best bid price (price we can sell at)."""
         try:
             book = self.executor.client.get_order_book(token_id)
-            bids = book.get("bids", []) if book else []
+            bids = self._orderbook_side(book, "bids")
             if bids:
-                p = float(bids[0].get("price", 0))
-                s = float(bids[0].get("size", 0)) if bids[0].get("size") is not None else 0.0
-                return {"price": p, "size": s}
-        except Exception:
+                p, s = self._orderbook_entry(bids[0])
+                if p is not None:
+                    return {"price": p, "size": s or 0.0}
+        except Exception as e:
+            self.logger.debug(f"_best_bid failed for {token_id[:12]}: {e}")
             return None
         return None
 
@@ -483,41 +511,43 @@ class CalendarArbitrageStrategy(BaseStrategy):
             book = self.executor.client.get_order_book(token_id)
             if not book:
                 return None
-            
+
             # For BUY: consume asks (sellers), for SELL: consume bids (buyers)
-            orders = book.get("asks" if side == "BUY" else "bids", [])
+            # Handles both OrderBookSummary dataclass and dict-shaped responses.
+            orders = self._orderbook_side(book, "asks" if side == "BUY" else "bids")
             if not orders:
                 return None
-            
+
             remaining_size = size
             total_cost = 0.0
             filled_size = 0.0
-            
+            first_price = None
+
             for order in orders:
-                order_price = float(order.get("price", 0))
-                order_size = float(order.get("size", 0)) if order.get("size") is not None else 0.0
-                
-                if order_size <= 0:
+                order_price, order_size = self._orderbook_entry(order)
+                if order_price is None or order_size is None or order_size <= 0:
                     continue
-                
+                if first_price is None:
+                    first_price = order_price
+
                 fill_amount = min(remaining_size, order_size)
                 total_cost += fill_amount * order_price
                 filled_size += fill_amount
                 remaining_size -= fill_amount
-                
+
                 if remaining_size <= 0:
                     break
-            
+
             if filled_size == 0:
                 return None
-            
+
             avg_price = total_cost / filled_size
             return {
                 "avg_price": avg_price,
                 "filled_size": filled_size,
                 "requested_size": size,
                 "fully_filled": remaining_size <= 0.01,  # tolerance
-                "slippage": (avg_price - float(orders[0].get("price", 0))) if orders else 0.0,
+                "slippage": (avg_price - first_price) if first_price is not None else 0.0,
             }
         except Exception as e:
             self.logger.debug(f"Error simulating fill: {e}")
