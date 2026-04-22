@@ -71,7 +71,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
         use_embeddings: bool = True,
         similarity_threshold: float = 0.85,
         use_llm: bool = True,
-        llm_model: str = "gemini-2.0-flash",
+        llm_model: str = "gemini-2.5-flash",
         use_database: bool = False,
         min_resolution_match_confidence: float = 0.9,
         probe_usd: float = 5.0,
