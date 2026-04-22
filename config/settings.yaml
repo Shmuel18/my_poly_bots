@@ -34,3 +34,18 @@ scanning:
   scan_interval: 300  # 5 minutes
   price_check_interval: 30  # 30 seconds
   max_markets_to_scan: 5000
+
+# Calendar Arbitrage Strategy
+# Defaults — CLI flags on run_calendar_bot.py override these.
+calendar_arbitrage:
+  min_profit_threshold: 0.01            # 1% minimum locked-in profit after fees
+  min_annualized_roi: 0.15              # 15% annualized ROI threshold (avoid long capital lockup)
+  estimated_fee: 0.01                   # per-leg fee/slippage buffer
+  min_resolution_match_confidence: 0.9  # LLM confidence that both markets resolve identically
+  similarity_threshold: 0.85            # cosine similarity cutoff for embedding match
+  # Human-in-the-loop tiered sizing (for $100 capital). Probe every new pair
+  # small; escalate to Telegram after a persistent spread; scale up once user
+  # approves in Telegram.
+  probe_usd: 5.0                        # probe size on newly-discovered pairs
+  confirmed_usd: 20.0                   # full size once user confirms via Telegram
+  escalation_minutes: 30                # hold probe this long before alerting

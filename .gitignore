@@ -62,3 +62,4 @@ backups/
 temp/
 *.bak
 *.orig
+.claude/
