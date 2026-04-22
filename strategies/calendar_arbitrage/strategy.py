@@ -538,6 +538,34 @@ class CalendarArbitrageStrategy(BaseStrategy):
         return False
 
 
+    # Pattern matching MONOTONIC deadline phrases only ("by June 30", "until 2026",
+    # "before December", "end of November"). Crucially excludes snapshot-style
+    # phrases like "on June 30" or "at the April meeting" — those are NOT
+    # calendar-arb-safe because the event being measured on a specific date
+    # doesn't propagate forward (e.g. "largest company on June 30" vs "on Dec 31"
+    # is two separate snapshots, not a monotonic deadline).
+    _MONOTONIC_DEADLINE_RE = re.compile(
+        r"\b(by|until|before|prior\s+to|no\s+later\s+than|end\s+of)\s+"
+        r"(the\s+)?(end\s+of\s+)?"
+        r"(\d{4}|\d{1,2}([/\-]\d{1,2}([/\-]\d{2,4})?)?|"
+        + r"|".join(MONTH_WORDS) + r")",
+        re.IGNORECASE,
+    )
+
+    def _has_monotonic_deadline(self, question: str) -> bool:
+        """True only if the question phrases its deadline monotonically.
+
+        Examples:
+          'Will X happen by November 15?'       → True
+          'Will X hit $100 by end of 2026?'     → True
+          'Will X be largest on June 30?'       → False (snapshot)
+          'Will X happen in November?'          → False (period-specific)
+          'Will Fed cut at April 29 meeting?'   → False (snapshot)
+        """
+        if not question:
+            return False
+        return bool(self._MONOTONIC_DEADLINE_RE.search(question))
+
     def _regex_discover_obvious_pairs(self, all_markets: List[Dict]) -> int:
         """Fast AI-free pre-pass: find pairs whose normalized title is IDENTICAL
         (after stripping temporal words). These are literally the same bet with
@@ -559,10 +587,16 @@ class CalendarArbitrageStrategy(BaseStrategy):
             for p in self.discovered_pairs
         }
 
-        # Bucket markets by normalized question
+        # Bucket markets by normalized question. Only markets whose original
+        # question uses a MONOTONIC deadline phrase ("by X", "until X",
+        # "before X", "end of X") qualify. Snapshot phrasings ("on June 30")
+        # look similar after normalization but don't satisfy the containment
+        # property needed for calendar arbitrage.
         by_norm: Dict[str, List[Dict]] = {}
         for m in all_markets:
             q = m.get('question', '') or ''
+            if not self._has_monotonic_deadline(q):
+                continue
             norm = self._normalize_question(q)
             if len(norm) < 20:
                 continue  # Too short → risk of spurious matches
