@@ -1,0 +1,27 @@
+[Unit]
+Description=Polymarket calendar-arbitrage bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# REPLACE %USER% and %HOME% with your values, or install via deploy/install_service.sh
+User=%USER%
+WorkingDirectory=%HOME%/my_poly_bots
+Environment=PYTHONIOENCODING=utf-8
+ExecStart=%HOME%/my_poly_bots/.venv/bin/python %HOME%/my_poly_bots/run_calendar_bot.py \
+    --env %HOME%/my_poly_bots/config/.env \
+    --live \
+    --use-llm
+Restart=on-failure
+RestartSec=15
+# Stop the bot gracefully — give it 30s to unwind positions before SIGKILL
+TimeoutStopSec=30
+KillSignal=SIGINT
+
+# Resource hygiene
+StandardOutput=append:%HOME%/my_poly_bots/logs/polybot.out.log
+StandardError=append:%HOME%/my_poly_bots/logs/polybot.err.log
+
+[Install]
+WantedBy=multi-user.target
