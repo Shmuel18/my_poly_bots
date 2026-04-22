@@ -538,6 +538,93 @@ class CalendarArbitrageStrategy(BaseStrategy):
         return False
 
 
+    def _regex_discover_obvious_pairs(self, all_markets: List[Dict]) -> int:
+        """Fast AI-free pre-pass: find pairs whose normalized title is IDENTICAL
+        (after stripping temporal words). These are literally the same bet with
+        different deadlines — a mathematical certainty that doesn't need LLM
+        verification. Auto-added to confirmed_pairs so they trade at full size.
+
+        Returns count of newly-discovered pairs.
+
+        Safety guardrails:
+        - Normalized question must be ≥ 20 chars (avoids trivial false matches)
+        - Must have strictly different endDates (temporal containment)
+        - Title alone doesn't guarantee identical resolution rules, but for
+          Polymarket's operator templates this is overwhelmingly reliable.
+        """
+        import time as _time
+
+        existing_pair_keys = {
+            tuple(sorted((p.get('early_id', ''), p.get('late_id', ''))))
+            for p in self.discovered_pairs
+        }
+
+        # Bucket markets by normalized question
+        by_norm: Dict[str, List[Dict]] = {}
+        for m in all_markets:
+            q = m.get('question', '') or ''
+            norm = self._normalize_question(q)
+            if len(norm) < 20:
+                continue  # Too short → risk of spurious matches
+            by_norm.setdefault(norm, []).append(m)
+
+        new_count = 0
+        now = _time.time()
+        for norm_q, markets in by_norm.items():
+            if len(markets) < 2:
+                continue
+            # Attach parsed end dates, drop markets without them
+            dated = []
+            for m in markets:
+                d = self._parse_end_date(m.get('endDate'))
+                if d is not None:
+                    dated.append((m, d))
+            dated.sort(key=lambda x: x[1])
+            if len(dated) < 2:
+                continue
+
+            for i in range(len(dated)):
+                early_m, early_end = dated[i]
+                for j in range(i + 1, len(dated)):
+                    late_m, late_end = dated[j]
+                    if early_end >= late_end:
+                        continue  # Same endDate or inverted → not a calendar pair
+                    key_tuple = tuple(sorted((early_m['id'], late_m['id'])))
+                    if key_tuple in existing_pair_keys:
+                        continue
+                    existing_pair_keys.add(key_tuple)
+
+                    self.discovered_pairs.append({
+                        "early_id": early_m['id'],
+                        "late_id": late_m['id'],
+                        "description": f"Regex auto-match (identical normalized title): \"{norm_q[:80]}\"",
+                        "early_question": early_m.get('question', ''),
+                        "resolution_match_confidence": 1.0,
+                        "discovery_method": "regex_exact",
+                    })
+                    # Auto-confirmed: trade at confirmed_usd without Telegram gate
+                    pair_key = self._pair_key(early_m['id'], late_m['id'])
+                    self.confirmed_pairs[pair_key] = {
+                        "confirmed_at": now,
+                        "confirmed_by": "regex_auto",
+                        "early_id": early_m['id'],
+                        "late_id": late_m['id'],
+                        "early_question": early_m.get('question', ''),
+                        "late_question": late_m.get('question', ''),
+                        "normalized_title": norm_q[:120],
+                    }
+                    new_count += 1
+                    self.logger.info(
+                        f"🎯 Auto-confirmed regex pair: '{norm_q[:60]}' "
+                        f"(early ends {early_end.date()}, late ends {late_end.date()})"
+                    )
+
+        if new_count > 0:
+            self._save_discovered_pairs()
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self.logger.info(f"📐 Regex discovery: {new_count} new auto-confirmed pair(s)")
+        return new_count
+
     async def scan(self) -> List[Dict[str, Any]]:
         all_markets = self.scanner.get_all_active_markets(max_markets=5000)
         if not all_markets:
@@ -548,6 +635,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
         market_map = {m['id']: m for m in all_markets}
         # Cache for _check_escalations (avoids a second scanner fetch).
         self._last_market_map = market_map
+
+        # --- Regex-based Discovery (AI-free pre-pass) ---
+        # Catches pairs whose titles are identical after date-stripping. Runs
+        # every scan, regardless of LLM availability, so the bot keeps finding
+        # obvious opportunities even if GEMINI_API_KEY is unset/invalid.
+        self._regex_discover_obvious_pairs(all_markets)
 
         # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
