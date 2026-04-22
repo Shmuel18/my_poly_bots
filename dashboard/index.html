@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Polybot Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  body { font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
+  pre { white-space: pre-wrap; word-break: break-word; }
+  .log-line { font-family: Menlo, Consolas, monospace; font-size: 11px; line-height: 1.35; }
+  .log-ERROR { color: #dc2626; }
+  .log-WARNING { color: #d97706; }
+  .log-INFO { color: #1f2937; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 0.25rem;
+    padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600;
+  }
+  .pill-green { background: #d1fae5; color: #065f46; }
+  .pill-red { background: #fee2e2; color: #991b1b; }
+  .pill-yellow { background: #fef3c7; color: #92400e; }
+  .pill-blue { background: #dbeafe; color: #1e40af; }
+  .pill-gray { background: #e5e7eb; color: #374151; }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-900">
+<div class="max-w-7xl mx-auto p-4 space-y-4">
+
+  <header class="flex items-center justify-between">
+    <div>
+      <h1 class="text-2xl font-bold">🛰️ Polybot Dashboard</h1>
+      <p class="text-sm text-gray-500" id="updated">loading…</p>
+    </div>
+    <div class="text-left text-sm text-gray-600" dir="ltr">
+      <span id="service-pill" class="pill pill-gray">loading</span>
+      <span id="uptime" class="ms-2"></span>
+    </div>
+  </header>
+
+  <!-- Status cards -->
+  <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="bg-white rounded-lg shadow-sm p-4">
+      <div class="text-xs text-gray-500">יתרת USDC</div>
+      <div id="balance" class="text-2xl font-semibold mt-1">—</div>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm p-4">
+      <div class="text-xs text-gray-500">זוגות מאושרים</div>
+      <div id="count-confirmed" class="text-2xl font-semibold mt-1 text-green-700">—</div>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm p-4">
+      <div class="text-xs text-gray-500">ממתינים לאישור</div>
+      <div id="count-pending" class="text-2xl font-semibold mt-1 text-amber-700">—</div>
+    </div>
+    <div class="bg-white rounded-lg shadow-sm p-4">
+      <div class="text-xs text-gray-500">נדחים</div>
+      <div id="count-rejected" class="text-2xl font-semibold mt-1 text-red-700">—</div>
+    </div>
+  </section>
+
+  <!-- Env badges -->
+  <section class="bg-white rounded-lg shadow-sm p-4">
+    <div class="text-xs text-gray-500 mb-2">מפתחות מוגדרים (לא מציג ערכים)</div>
+    <div id="env-flags" class="flex flex-wrap gap-2"></div>
+  </section>
+
+  <!-- Confirmed pairs -->
+  <section class="bg-white rounded-lg shadow-sm p-4">
+    <h2 class="font-semibold mb-2">✅ זוגות מאושרים (מסחר פעיל)</h2>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="text-gray-500 text-xs uppercase">
+          <tr><th class="text-right py-1">מקור</th><th class="text-right py-1">Early</th><th class="text-right py-1">Late</th><th class="text-right py-1">אושר ב</th></tr>
+        </thead>
+        <tbody id="confirmed-body" class="divide-y"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Pending pairs -->
+  <section class="bg-white rounded-lg shadow-sm p-4">
+    <h2 class="font-semibold mb-2">⏳ זוגות ממתינים לאישור שלך בטלגרם</h2>
+    <div class="overflow-x-auto">
+      <table class="min-w-full text-sm">
+        <thead class="text-gray-500 text-xs uppercase">
+          <tr><th class="text-right py-1">Early question</th><th class="text-right py-1">נפתח לפני</th><th class="text-right py-1">התראה נשלחה?</th></tr>
+        </thead>
+        <tbody id="pending-body" class="divide-y"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Open positions -->
+  <section class="bg-white rounded-lg shadow-sm p-4">
+    <h2 class="font-semibold mb-2">📍 פוזיציות פתוחות</h2>
+    <div id="positions-body" class="text-sm text-gray-500">—</div>
+  </section>
+
+  <!-- Logs -->
+  <section class="bg-white rounded-lg shadow-sm p-4">
+    <h2 class="font-semibold mb-2">📜 לוגים אחרונים</h2>
+    <pre id="logs" class="bg-gray-900 text-gray-100 rounded p-3 max-h-96 overflow-y-auto log-line" dir="ltr">loading…</pre>
+  </section>
+
+</div>
+
+<script>
+const fmtTs = (unix) => {
+  if (!unix) return "—";
+  const d = new Date(unix * 1000);
+  return d.toLocaleString("he-IL", { hour12: false });
+};
+const fmtUptime = (sec) => {
+  if (!sec) return "";
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+};
+const setPill = (el, label, cls) => {
+  el.textContent = label;
+  el.className = "pill " + cls;
+};
+
+async function refresh() {
+  try {
+    const [statusR, pairsR, positionsR, logsR] = await Promise.all([
+      fetch("/api/status").then(r => r.json()),
+      fetch("/api/pairs").then(r => r.json()),
+      fetch("/api/positions").then(r => r.json()),
+      fetch("/api/logs?n=80").then(r => r.json()),
+    ]);
+
+    // Service status
+    const svc = statusR.service || {};
+    const pill = document.getElementById("service-pill");
+    if (svc.active === "active") setPill(pill, "● running", "pill-green");
+    else if (svc.active === "failed") setPill(pill, "✗ failed", "pill-red");
+    else setPill(pill, svc.active || "unknown", "pill-gray");
+    document.getElementById("uptime").textContent = svc.uptime_sec ? `uptime ${fmtUptime(svc.uptime_sec)} · ${svc.memory_mb ?? "?"}MB` : "";
+    document.getElementById("updated").textContent = `עדכון אחרון: ${fmtTs(statusR.server_time)}`;
+
+    // Balance
+    const bal = statusR.latest_balance_usd;
+    document.getElementById("balance").textContent = bal === null || bal === undefined ? "—" : `$${bal.toFixed(2)}`;
+
+    // Env flags
+    const envHost = document.getElementById("env-flags");
+    envHost.innerHTML = "";
+    const labels = {
+      POLYMARKET_API_KEY: "Polymarket API",
+      POLYMARKET_PRIVATE_KEY: "Private key",
+      POLYMARKET_FUNDER_ADDRESS: "Funder",
+      GEMINI_API_KEY: "Gemini",
+      TELEGRAM_BOT_TOKEN: "Telegram token",
+      TELEGRAM_CHAT_ID: "Telegram chat_id",
+    };
+    Object.entries(statusR.env || {}).forEach(([k, v]) => {
+      const span = document.createElement("span");
+      span.className = "pill " + (v ? "pill-green" : "pill-red");
+      span.textContent = (v ? "✓ " : "✗ ") + (labels[k] || k);
+      envHost.appendChild(span);
+    });
+
+    // Counts
+    document.getElementById("count-confirmed").textContent = pairsR.counts.confirmed;
+    document.getElementById("count-pending").textContent = pairsR.counts.pending;
+    document.getElementById("count-rejected").textContent = pairsR.counts.rejected;
+
+    // Confirmed pairs table
+    const confirmedBody = document.getElementById("confirmed-body");
+    confirmedBody.innerHTML = "";
+    Object.entries(pairsR.confirmed || {}).forEach(([key, info]) => {
+      const tr = document.createElement("tr");
+      const src = info.confirmed_by || "?";
+      const srcPill = src === "regex_auto" ? "<span class='pill pill-blue'>regex</span>"
+        : src.toString().startsWith("user") || typeof src === "number" ? "<span class='pill pill-green'>user</span>"
+        : `<span class='pill pill-gray'>${src}</span>`;
+      tr.innerHTML = `
+        <td class="py-1 pe-2">${srcPill}</td>
+        <td class="py-1 pe-2">${(info.early_question || "").slice(0, 100)}</td>
+        <td class="py-1 pe-2">${(info.late_question || "").slice(0, 100)}</td>
+        <td class="py-1 pe-2 text-xs text-gray-500">${fmtTs(info.confirmed_at)}</td>`;
+      confirmedBody.appendChild(tr);
+    });
+    if (confirmedBody.children.length === 0) {
+      confirmedBody.innerHTML = `<tr><td colspan="4" class="text-gray-400 py-2 text-center">אין זוגות מאושרים</td></tr>`;
+    }
+
+    // Pending pairs
+    const pendingBody = document.getElementById("pending-body");
+    pendingBody.innerHTML = "";
+    const now = Math.floor(Date.now() / 1000);
+    Object.entries(pairsR.pending || {}).forEach(([key, info]) => {
+      const tr = document.createElement("tr");
+      const opened = info.opened_at || now;
+      const age = Math.max(0, now - opened);
+      tr.innerHTML = `
+        <td class="py-1 pe-2">${(info.early_question || "").slice(0, 120)}</td>
+        <td class="py-1 pe-2 text-xs text-gray-600">${fmtUptime(age) || "just now"}</td>
+        <td class="py-1 pe-2">${info.alerted
+          ? "<span class='pill pill-blue'>sent</span>"
+          : "<span class='pill pill-gray'>waiting</span>"}</td>`;
+      pendingBody.appendChild(tr);
+    });
+    if (pendingBody.children.length === 0) {
+      pendingBody.innerHTML = `<tr><td colspan="3" class="text-gray-400 py-2 text-center">אין זוגות ממתינים</td></tr>`;
+    }
+
+    // Positions
+    const positionsHost = document.getElementById("positions-body");
+    if (positionsR.count === 0) {
+      positionsHost.innerHTML = `<span class="text-gray-400">אין פוזיציות פתוחות</span>`;
+    } else {
+      positionsHost.innerHTML = `<pre class="text-xs bg-gray-50 rounded p-2">${JSON.stringify(positionsR.positions, null, 2)}</pre>`;
+    }
+
+    // Logs
+    const logsEl = document.getElementById("logs");
+    logsEl.innerHTML = "";
+    (logsR.lines || []).forEach(line => {
+      const div = document.createElement("div");
+      let cls = "log-INFO";
+      if (/\bERROR\b/.test(line)) cls = "log-ERROR";
+      else if (/\bWARNING\b/.test(line)) cls = "log-WARNING";
+      div.className = "log-line " + cls;
+      div.textContent = line;
+      logsEl.appendChild(div);
+    });
+    logsEl.scrollTop = logsEl.scrollHeight;
+  } catch (err) {
+    console.error(err);
+    document.getElementById("updated").textContent = "שגיאה בטעינה: " + err.message;
+  }
+}
+
+refresh();
+setInterval(refresh, 10_000);
+</script>
+</body>
+</html>

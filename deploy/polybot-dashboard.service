@@ -1,0 +1,22 @@
+[Unit]
+Description=Polybot read-only web dashboard (FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%USER%
+WorkingDirectory=%HOME%/my_poly_bots
+Environment=PYTHONIOENCODING=utf-8
+Environment=POLYBOT_DIR=%HOME%/my_poly_bots
+Environment=POLYBOT_SERVICE=polybot.service
+ExecStart=%HOME%/my_poly_bots/.venv/bin/uvicorn dashboard.app:app \
+    --host 0.0.0.0 --port 8080 --log-level warning
+Restart=on-failure
+RestartSec=10
+
+StandardOutput=append:%HOME%/my_poly_bots/logs/dashboard.out.log
+StandardError=append:%HOME%/my_poly_bots/logs/dashboard.err.log
+
+[Install]
+WantedBy=multi-user.target
