@@ -2,236 +2,593 @@
 <html lang="he" dir="rtl">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Polybot Dashboard</title>
-<script src="https://cdn.tailwindcss.com"></script>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>botview.live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
-  body { font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; }
-  pre { white-space: pre-wrap; word-break: break-word; }
-  .log-line { font-family: Menlo, Consolas, monospace; font-size: 11px; line-height: 1.35; }
-  .log-ERROR { color: #dc2626; }
-  .log-WARNING { color: #d97706; }
-  .log-INFO { color: #1f2937; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 0.25rem;
-    padding: 2px 10px; border-radius: 9999px; font-size: 12px; font-weight: 600;
+  :root {
+    --bg: #f5f5f5;
+    --card: #ffffff;
+    --border: #e5e7eb;
+    --border-strong: #d1d5db;
+    --text: #1a1d29;
+    --text-secondary: #6b7280;
+    --text-muted: #9ca3af;
+    --primary: #1652f0;
+    --primary-hover: #0d3bc7;
+    --primary-soft: #eaf0ff;
+    --success: #0b8c3d;
+    --success-soft: #dcfce7;
+    --danger: #dc2626;
+    --danger-soft: #fee2e2;
+    --warning: #d97706;
+    --warning-soft: #fef3c7;
+    --radius: 12px;
+    --radius-sm: 8px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-hover: 0 4px 12px rgba(0,0,0,0.08);
   }
-  .pill-green { background: #d1fae5; color: #065f46; }
-  .pill-red { background: #fee2e2; color: #991b1b; }
-  .pill-yellow { background: #fef3c7; color: #92400e; }
-  .pill-blue { background: #dbeafe; color: #1e40af; }
-  .pill-gray { background: #e5e7eb; color: #374151; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+  body.rtl { direction: rtl; }
+  body.ltr { direction: ltr; }
+  .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
+  a { color: inherit; text-decoration: none; }
+
+  /* Header */
+  .header {
+    position: sticky; top: 0; z-index: 50;
+    background: var(--card);
+    border-bottom: 1px solid var(--border);
+    height: 56px;
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 24px;
+  }
+  .logo {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 800; font-size: 17px; letter-spacing: -0.01em;
+  }
+  .logo .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); }
+  .nav {
+    display: flex; gap: 4px; flex: 1;
+  }
+  .nav a {
+    padding: 6px 12px; border-radius: var(--radius-sm);
+    font-weight: 500; color: var(--text-secondary);
+    transition: background 0.12s, color 0.12s;
+  }
+  .nav a:hover { background: var(--bg); color: var(--text); }
+  .nav a.active { background: var(--primary-soft); color: var(--primary); }
+  .header-right {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 10px; border-radius: 9999px;
+    font-size: 12px; font-weight: 600;
+    line-height: 1.4;
+  }
+  .pill-dot::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+    display: inline-block;
+  }
+  .pill-success { background: var(--success-soft); color: var(--success); }
+  .pill-danger { background: var(--danger-soft); color: var(--danger); }
+  .pill-warning { background: var(--warning-soft); color: var(--warning); }
+  .pill-primary { background: var(--primary-soft); color: var(--primary); }
+  .pill-gray { background: #f3f4f6; color: #4b5563; }
+  .lang-toggle {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    display: inline-flex;
+    overflow: hidden;
+    font-weight: 600; font-size: 12px;
+  }
+  .lang-toggle button {
+    border: 0; background: transparent; color: var(--text-secondary);
+    padding: 4px 10px; cursor: pointer; font-family: inherit; font-weight: 600;
+  }
+  .lang-toggle button.active { background: var(--text); color: #fff; }
+
+  /* Layout */
+  main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 48px; }
+  .page-title {
+    font-size: 22px; font-weight: 700; letter-spacing: -0.01em;
+    margin: 0 0 4px 0;
+  }
+  .page-subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+
+  /* Hero stats */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .stat-label {
+    font-size: 12px; color: var(--text-secondary);
+    text-transform: uppercase; letter-spacing: 0.04em;
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .stat-value {
+    font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
+    color: var(--text);
+  }
+  .stat-value.success { color: var(--success); }
+  .stat-value.warning { color: var(--warning); }
+  .stat-value.danger { color: var(--danger); }
+  .stat-delta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  /* Section header */
+  .section-header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin: 24px 0 12px;
+  }
+  .section-title { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
+  .section-count { color: var(--text-muted); font-size: 13px; font-weight: 500; }
+
+  /* Pair cards grid */
+  .pairs {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+    gap: 14px;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px;
+    box-shadow: var(--shadow);
+    transition: box-shadow 0.15s, transform 0.15s;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .card:hover {
+    box-shadow: var(--shadow-hover);
+  }
+  .card-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    flex-wrap: wrap;
+  }
+  .card-top-left { display: flex; gap: 6px; flex-wrap: wrap; }
+  .live-dot {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 11px; color: var(--text-muted); font-weight: 500;
+  }
+  .live-dot .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-muted);
+  }
+  .live-dot.is-live .dot {
+    background: var(--success);
+    box-shadow: 0 0 0 3px rgba(11,140,61,0.15);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 3px rgba(11,140,61,0.15); }
+    50% { box-shadow: 0 0 0 5px rgba(11,140,61,0.05); }
+  }
+
+  .leg {
+    display: grid;
+    grid-template-columns: 52px 1fr;
+    align-items: baseline;
+    gap: 8px;
+  }
+  .leg-label {
+    font-size: 10px; font-weight: 700; color: var(--text-muted);
+    letter-spacing: 0.08em; text-transform: uppercase;
+  }
+  .leg-q {
+    font-size: 14px; color: var(--text); font-weight: 500;
+    line-height: 1.4;
+  }
+  .divider { height: 1px; background: var(--border); margin: 0; }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+  }
+  .stat-block .label {
+    font-size: 11px; color: var(--text-secondary);
+    font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
+    margin-bottom: 2px;
+  }
+  .stat-block .value {
+    font-size: 20px; font-weight: 700; letter-spacing: -0.01em;
+  }
+  .stat-block .value.success { color: var(--success); }
+  .stat-block .value.danger { color: var(--danger); }
+
+  .progress {
+    height: 6px; background: var(--border); border-radius: 9999px; overflow: hidden;
+    margin-top: 6px;
+  }
+  .progress-fill {
+    height: 100%; background: var(--primary); transition: width 0.3s;
+  }
+  .progress-fill.success { background: var(--success); }
+  .progress-fill.danger { background: var(--danger); }
+
+  .meta-row {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    font-size: 11px; color: var(--text-muted); font-weight: 500;
+  }
+  .meta-sep { opacity: 0.5; }
+  .placeholder {
+    font-size: 13px; color: var(--text-muted); font-style: italic;
+    padding: 8px 0;
+  }
+
+  /* Empty state */
+  .empty {
+    background: var(--card);
+    border: 1px dashed var(--border-strong);
+    border-radius: var(--radius);
+    padding: 48px 20px;
+    text-align: center;
+    color: var(--text-secondary);
+  }
+  .empty-icon { font-size: 40px; margin-bottom: 8px; opacity: 0.5; }
+  .empty h3 { margin: 0 0 6px; color: var(--text); font-size: 16px; }
+  .empty p { margin: 0; font-size: 13px; }
+
+  /* Responsive */
+  @media (max-width: 1024px) {
+    .pairs { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+  }
+  @media (max-width: 640px) {
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .pairs { grid-template-columns: 1fr; }
+    .header { padding: 0 14px; gap: 12px; }
+    .nav { gap: 0; overflow-x: auto; -ms-overflow-style: none; scrollbar-width: none; }
+    .nav::-webkit-scrollbar { display: none; }
+    main { padding: 16px 14px 32px; }
+    .stat-value { font-size: 22px; }
+  }
 </style>
 </head>
-<body class="bg-gray-50 text-gray-900">
-<div class="max-w-7xl mx-auto p-4 space-y-4">
+<body class="rtl">
 
-  <header class="flex items-center justify-between">
-    <div>
-      <h1 class="text-2xl font-bold">🛰️ Polybot Dashboard</h1>
-      <p class="text-sm text-gray-500" id="updated">loading…</p>
+<header class="header">
+  <a class="logo" href="/">
+    <span class="dot"></span>
+    <span>botview.live</span>
+  </a>
+  <nav class="nav">
+    <a href="/" class="active" data-i18n="nav.home">ראשי</a>
+    <a href="/logs" data-i18n="nav.logs">לוגים</a>
+    <a href="/env" data-i18n="nav.env">הגדרות</a>
+  </nav>
+  <div class="header-right">
+    <span id="service-pill" class="pill pill-gray pill-dot">—</span>
+    <div class="lang-toggle" role="group" aria-label="Language">
+      <button type="button" data-lang="he">עב</button>
+      <button type="button" data-lang="en">EN</button>
     </div>
-    <div class="text-left text-sm text-gray-600" dir="ltr">
-      <span id="service-pill" class="pill pill-gray">loading</span>
-      <span id="uptime" class="ms-2"></span>
-    </div>
-  </header>
+  </div>
+</header>
 
-  <!-- Status cards -->
-  <section class="grid grid-cols-2 md:grid-cols-4 gap-3">
-    <div class="bg-white rounded-lg shadow-sm p-4">
-      <div class="text-xs text-gray-500">יתרת USDC</div>
-      <div id="balance" class="text-2xl font-semibold mt-1">—</div>
-    </div>
-    <div class="bg-white rounded-lg shadow-sm p-4">
-      <div class="text-xs text-gray-500">זוגות מאושרים</div>
-      <div id="count-confirmed" class="text-2xl font-semibold mt-1 text-green-700">—</div>
-    </div>
-    <div class="bg-white rounded-lg shadow-sm p-4">
-      <div class="text-xs text-gray-500">ממתינים לאישור</div>
-      <div id="count-pending" class="text-2xl font-semibold mt-1 text-amber-700">—</div>
-    </div>
-    <div class="bg-white rounded-lg shadow-sm p-4">
-      <div class="text-xs text-gray-500">נדחים</div>
-      <div id="count-rejected" class="text-2xl font-semibold mt-1 text-red-700">—</div>
-    </div>
-  </section>
+<main>
+  <h1 class="page-title" data-i18n="page.title">הזדמנויות ארביטראז'</h1>
+  <p class="page-subtitle" id="subtitle">—</p>
 
-  <!-- Env badges -->
-  <section class="bg-white rounded-lg shadow-sm p-4">
-    <div class="text-xs text-gray-500 mb-2">מפתחות מוגדרים (לא מציג ערכים)</div>
-    <div id="env-flags" class="flex flex-wrap gap-2"></div>
-  </section>
-
-  <!-- Confirmed pairs -->
-  <section class="bg-white rounded-lg shadow-sm p-4">
-    <h2 class="font-semibold mb-2">✅ זוגות מאושרים (מסחר פעיל)</h2>
-    <div class="overflow-x-auto">
-      <table class="min-w-full text-sm">
-        <thead class="text-gray-500 text-xs uppercase">
-          <tr><th class="text-right py-1">מקור</th><th class="text-right py-1">Early</th><th class="text-right py-1">Late</th><th class="text-right py-1">אושר ב</th></tr>
-        </thead>
-        <tbody id="confirmed-body" class="divide-y"></tbody>
-      </table>
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-label" data-i18n="stat.balance">יתרת USDC</div>
+      <div id="balance" class="stat-value num">—</div>
+      <div id="balance-sub" class="stat-delta"></div>
     </div>
-  </section>
-
-  <!-- Pending pairs -->
-  <section class="bg-white rounded-lg shadow-sm p-4">
-    <h2 class="font-semibold mb-2">⏳ זוגות ממתינים לאישור שלך בטלגרם</h2>
-    <div class="overflow-x-auto">
-      <table class="min-w-full text-sm">
-        <thead class="text-gray-500 text-xs uppercase">
-          <tr><th class="text-right py-1">Early question</th><th class="text-right py-1">נפתח לפני</th><th class="text-right py-1">התראה נשלחה?</th></tr>
-        </thead>
-        <tbody id="pending-body" class="divide-y"></tbody>
-      </table>
+    <div class="stat-card">
+      <div class="stat-label" data-i18n="stat.confirmed">זוגות פעילים</div>
+      <div id="count-confirmed" class="stat-value num success">—</div>
+      <div class="stat-delta" data-i18n="stat.confirmed.sub">נסחרים אוטומטית</div>
     </div>
-  </section>
+    <div class="stat-card">
+      <div class="stat-label" data-i18n="stat.pending">ממתינים לאישור</div>
+      <div id="count-pending" class="stat-value num warning">—</div>
+      <div class="stat-delta" data-i18n="stat.pending.sub">ב-Telegram</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label" data-i18n="stat.discovered">זוגות במעקב</div>
+      <div id="count-discovered" class="stat-value num">—</div>
+      <div class="stat-delta" id="discovery-sub"></div>
+    </div>
+  </div>
 
-  <!-- Open positions -->
-  <section class="bg-white rounded-lg shadow-sm p-4">
-    <h2 class="font-semibold mb-2">📍 פוזיציות פתוחות</h2>
-    <div id="positions-body" class="text-sm text-gray-500">—</div>
-  </section>
+  <div class="section-header">
+    <h2 class="section-title" data-i18n="section.pairs">זוגות מנוטרים</h2>
+    <span class="section-count" id="pairs-count">—</span>
+  </div>
 
-  <!-- Logs -->
-  <section class="bg-white rounded-lg shadow-sm p-4">
-    <h2 class="font-semibold mb-2">📜 לוגים אחרונים</h2>
-    <pre id="logs" class="bg-gray-900 text-gray-100 rounded p-3 max-h-96 overflow-y-auto log-line" dir="ltr">loading…</pre>
-  </section>
-
-</div>
+  <div id="pairs" class="pairs"></div>
+</main>
 
 <script>
-const fmtTs = (unix) => {
-  if (!unix) return "—";
-  const d = new Date(unix * 1000);
-  return d.toLocaleString("he-IL", { hour12: false });
+/* ============ i18n ============ */
+const I18N = {
+  he: {
+    "nav.home": "ראשי",
+    "nav.logs": "לוגים",
+    "nav.env": "הגדרות",
+    "page.title": "הזדמנויות ארביטראז'",
+    "stat.balance": "יתרת USDC",
+    "stat.confirmed": "זוגות פעילים",
+    "stat.confirmed.sub": "נסחרים אוטומטית",
+    "stat.pending": "ממתינים לאישור",
+    "stat.pending.sub": "ב-Telegram",
+    "stat.discovered": "זוגות במעקב",
+    "section.pairs": "זוגות מנוטרים",
+    "leg.early": "מוקדם",
+    "leg.late": "מאוחר",
+    "card.totalCost": "עלות כניסה",
+    "card.lockedProfit": "רווח נעול",
+    "card.waiting": "ממתין לתמחור מהספר…",
+    "card.endsPrefix": "ends",
+    "card.daysLeft": "ימים",
+    "source.regex": "זיהוי אוטומטי",
+    "source.llm": "זוהה ע״י AI",
+    "source.user": "אושר על ידך",
+    "empty.title": "הבוט סורק שווקים…",
+    "empty.body": "זוגות יופיעו כאן ברגע שיזוהו.",
+    "status.running": "פועל",
+    "status.failed": "כשל",
+    "status.unknown": "לא ידוע",
+    "subtitle.updated": "עדכון אחרון",
+  },
+  en: {
+    "nav.home": "Home",
+    "nav.logs": "Logs",
+    "nav.env": "Settings",
+    "page.title": "Arbitrage opportunities",
+    "stat.balance": "USDC balance",
+    "stat.confirmed": "Active pairs",
+    "stat.confirmed.sub": "Trading automatically",
+    "stat.pending": "Pending approval",
+    "stat.pending.sub": "On Telegram",
+    "stat.discovered": "Tracked pairs",
+    "section.pairs": "Monitored pairs",
+    "leg.early": "EARLY",
+    "leg.late": "LATE",
+    "card.totalCost": "Entry cost",
+    "card.lockedProfit": "Locked profit",
+    "card.waiting": "Waiting for orderbook pricing…",
+    "card.endsPrefix": "ends",
+    "card.daysLeft": "days left",
+    "source.regex": "Auto-matched",
+    "source.llm": "AI-matched",
+    "source.user": "User approved",
+    "empty.title": "Bot is scanning markets…",
+    "empty.body": "Pairs will appear here once detected.",
+    "status.running": "Running",
+    "status.failed": "Failed",
+    "status.unknown": "Unknown",
+    "subtitle.updated": "Last update",
+  },
 };
-const fmtUptime = (sec) => {
-  if (!sec) return "";
-  const h = Math.floor(sec / 3600);
-  const m = Math.floor((sec % 3600) / 60);
+
+let LANG = localStorage.getItem("dashLang") || (navigator.language.startsWith("he") ? "he" : "he");
+function t(key) { return (I18N[LANG] && I18N[LANG][key]) || key; }
+function applyLanguage() {
+  document.documentElement.lang = LANG;
+  document.documentElement.dir = LANG === "he" ? "rtl" : "ltr";
+  document.body.className = LANG === "he" ? "rtl" : "ltr";
+  document.querySelectorAll("[data-i18n]").forEach(el => {
+    el.textContent = t(el.dataset.i18n);
+  });
+  document.querySelectorAll(".lang-toggle button").forEach(btn => {
+    btn.classList.toggle("active", btn.dataset.lang === LANG);
+  });
+  if (typeof lastData !== "undefined" && lastData) render(lastData);
+}
+document.querySelectorAll(".lang-toggle button").forEach(btn => {
+  btn.addEventListener("click", () => {
+    LANG = btn.dataset.lang;
+    localStorage.setItem("dashLang", LANG);
+    applyLanguage();
+  });
+});
+
+/* ============ Helpers ============ */
+const fmtTs = u => {
+  if (!u) return "—";
+  return new Date(u * 1000).toLocaleTimeString(LANG === "he" ? "he-IL" : "en-US", { hour12: false });
+};
+const fmtUptime = s => {
+  if (!s) return "";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 };
-const setPill = (el, label, cls) => {
-  el.textContent = label;
-  el.className = "pill " + cls;
+const escapeHtml = s => (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+const fmtDate = iso => {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(LANG === "he" ? "he-IL" : "en-US", { day: "numeric", month: "short" });
+  } catch { return iso.slice(0, 10); }
 };
+const clampPct = x => Math.max(0, Math.min(100, x || 0));
+
+function sourcePill(p) {
+  const method = p.discovery_method || "llm";
+  if (method === "regex_exact" || method === "regex_auto") {
+    return `<span class="pill pill-primary">🎯 ${t("source.regex")}</span>`;
+  }
+  if (p.tier === "confirmed" && !String(method).includes("regex")) {
+    return `<span class="pill pill-success">✅ ${t("source.user")}</span>`;
+  }
+  return `<span class="pill pill-gray">🤖 ${t("source.llm")}</span>`;
+}
+
+function daysPill(days) {
+  if (days == null || !isFinite(days)) return "";
+  const d = Math.max(0, Math.floor(days));
+  let cls = "pill-gray";
+  if (d <= 7) cls = "pill-danger";
+  else if (d <= 30) cls = "pill-warning";
+  return `<span class="pill ${cls}">📅 ${d} ${t("card.daysLeft")}</span>`;
+}
+
+function liveDot(updatedAt) {
+  const nowSec = Date.now() / 1000;
+  const fresh = updatedAt && (nowSec - updatedAt) < 30;
+  return `<span class="live-dot ${fresh ? "is-live" : ""}"><span class="dot"></span>${fmtTs(updatedAt)}</span>`;
+}
+
+function renderPairCard(p) {
+  const live = p.live || {};
+  const totalCost = live.total_cost;
+  const profitPct = live.entry_profit_pct;
+  const hasPricing = totalCost != null;
+
+  let profitBlock = `<div class="placeholder">${t("card.waiting")}</div>`;
+  if (hasPricing) {
+    const profitCls = profitPct >= 0 ? "success" : "danger";
+    const barCls = profitPct >= 2 ? "success" : profitPct >= 0 ? "" : "danger";
+    profitBlock = `
+      <div class="stats-row">
+        <div class="stat-block">
+          <div class="label">${t("card.totalCost")}</div>
+          <div class="value num">$${totalCost.toFixed(3)}</div>
+        </div>
+        <div class="stat-block">
+          <div class="label">${t("card.lockedProfit")}</div>
+          <div class="value num ${profitCls}">${profitPct >= 0 ? "+" : ""}${profitPct.toFixed(1)}%</div>
+        </div>
+      </div>
+      <div class="progress">
+        <div class="progress-fill ${barCls}" style="width:${clampPct(profitPct * 4)}%"></div>
+      </div>`;
+  }
+
+  return `
+    <div class="card" data-pair="${escapeHtml(p.pair_key || "")}">
+      <div class="card-top">
+        <div class="card-top-left">
+          ${sourcePill(p)}
+          ${live.days_until_close != null ? daysPill(live.days_until_close) : ""}
+          ${p.tier === "confirmed" ? '<span class="pill pill-success">●&nbsp;active</span>' : ""}
+        </div>
+        ${liveDot(live.updated_at)}
+      </div>
+      <div>
+        <div class="leg">
+          <span class="leg-label">${t("leg.early")}</span>
+          <span class="leg-q">${escapeHtml(p.early_question || live.early_question || "—")}</span>
+        </div>
+        <div class="leg" style="margin-top:6px">
+          <span class="leg-label">${t("leg.late")}</span>
+          <span class="leg-q">${escapeHtml(live.late_question || "—")}</span>
+        </div>
+      </div>
+      <div class="divider"></div>
+      ${profitBlock}
+      <div class="meta-row">
+        ${live.early_end ? `<span>${t("card.endsPrefix")} ${fmtDate(live.early_end)}</span><span class="meta-sep">·</span>` : ""}
+        ${live.late_end ? `<span>${t("card.endsPrefix")} ${fmtDate(live.late_end)}</span>` : ""}
+      </div>
+    </div>`;
+}
+
+/* ============ Render ============ */
+let lastData = null;
 
 async function refresh() {
   try {
-    const [statusR, pairsR, positionsR, logsR] = await Promise.all([
+    const [status, pairs] = await Promise.all([
       fetch("/api/status").then(r => r.json()),
       fetch("/api/pairs").then(r => r.json()),
-      fetch("/api/positions").then(r => r.json()),
-      fetch("/api/logs?n=80").then(r => r.json()),
     ]);
-
-    // Service status
-    const svc = statusR.service || {};
-    const pill = document.getElementById("service-pill");
-    if (svc.active === "active") setPill(pill, "● running", "pill-green");
-    else if (svc.active === "failed") setPill(pill, "✗ failed", "pill-red");
-    else setPill(pill, svc.active || "unknown", "pill-gray");
-    document.getElementById("uptime").textContent = svc.uptime_sec ? `uptime ${fmtUptime(svc.uptime_sec)} · ${svc.memory_mb ?? "?"}MB` : "";
-    document.getElementById("updated").textContent = `עדכון אחרון: ${fmtTs(statusR.server_time)}`;
-
-    // Balance
-    const bal = statusR.latest_balance_usd;
-    document.getElementById("balance").textContent = bal === null || bal === undefined ? "—" : `$${bal.toFixed(2)}`;
-
-    // Env flags
-    const envHost = document.getElementById("env-flags");
-    envHost.innerHTML = "";
-    const labels = {
-      POLYMARKET_API_KEY: "Polymarket API",
-      POLYMARKET_PRIVATE_KEY: "Private key",
-      POLYMARKET_FUNDER_ADDRESS: "Funder",
-      GEMINI_API_KEY: "Gemini",
-      TELEGRAM_BOT_TOKEN: "Telegram token",
-      TELEGRAM_CHAT_ID: "Telegram chat_id",
-    };
-    Object.entries(statusR.env || {}).forEach(([k, v]) => {
-      const span = document.createElement("span");
-      span.className = "pill " + (v ? "pill-green" : "pill-red");
-      span.textContent = (v ? "✓ " : "✗ ") + (labels[k] || k);
-      envHost.appendChild(span);
-    });
-
-    // Counts
-    document.getElementById("count-confirmed").textContent = pairsR.counts.confirmed;
-    document.getElementById("count-pending").textContent = pairsR.counts.pending;
-    document.getElementById("count-rejected").textContent = pairsR.counts.rejected;
-
-    // Confirmed pairs table
-    const confirmedBody = document.getElementById("confirmed-body");
-    confirmedBody.innerHTML = "";
-    Object.entries(pairsR.confirmed || {}).forEach(([key, info]) => {
-      const tr = document.createElement("tr");
-      const src = info.confirmed_by || "?";
-      const srcPill = src === "regex_auto" ? "<span class='pill pill-blue'>regex</span>"
-        : src.toString().startsWith("user") || typeof src === "number" ? "<span class='pill pill-green'>user</span>"
-        : `<span class='pill pill-gray'>${src}</span>`;
-      tr.innerHTML = `
-        <td class="py-1 pe-2">${srcPill}</td>
-        <td class="py-1 pe-2">${(info.early_question || "").slice(0, 100)}</td>
-        <td class="py-1 pe-2">${(info.late_question || "").slice(0, 100)}</td>
-        <td class="py-1 pe-2 text-xs text-gray-500">${fmtTs(info.confirmed_at)}</td>`;
-      confirmedBody.appendChild(tr);
-    });
-    if (confirmedBody.children.length === 0) {
-      confirmedBody.innerHTML = `<tr><td colspan="4" class="text-gray-400 py-2 text-center">אין זוגות מאושרים</td></tr>`;
-    }
-
-    // Pending pairs
-    const pendingBody = document.getElementById("pending-body");
-    pendingBody.innerHTML = "";
-    const now = Math.floor(Date.now() / 1000);
-    Object.entries(pairsR.pending || {}).forEach(([key, info]) => {
-      const tr = document.createElement("tr");
-      const opened = info.opened_at || now;
-      const age = Math.max(0, now - opened);
-      tr.innerHTML = `
-        <td class="py-1 pe-2">${(info.early_question || "").slice(0, 120)}</td>
-        <td class="py-1 pe-2 text-xs text-gray-600">${fmtUptime(age) || "just now"}</td>
-        <td class="py-1 pe-2">${info.alerted
-          ? "<span class='pill pill-blue'>sent</span>"
-          : "<span class='pill pill-gray'>waiting</span>"}</td>`;
-      pendingBody.appendChild(tr);
-    });
-    if (pendingBody.children.length === 0) {
-      pendingBody.innerHTML = `<tr><td colspan="3" class="text-gray-400 py-2 text-center">אין זוגות ממתינים</td></tr>`;
-    }
-
-    // Positions
-    const positionsHost = document.getElementById("positions-body");
-    if (positionsR.count === 0) {
-      positionsHost.innerHTML = `<span class="text-gray-400">אין פוזיציות פתוחות</span>`;
-    } else {
-      positionsHost.innerHTML = `<pre class="text-xs bg-gray-50 rounded p-2">${JSON.stringify(positionsR.positions, null, 2)}</pre>`;
-    }
-
-    // Logs
-    const logsEl = document.getElementById("logs");
-    logsEl.innerHTML = "";
-    (logsR.lines || []).forEach(line => {
-      const div = document.createElement("div");
-      let cls = "log-INFO";
-      if (/\bERROR\b/.test(line)) cls = "log-ERROR";
-      else if (/\bWARNING\b/.test(line)) cls = "log-WARNING";
-      div.className = "log-line " + cls;
-      div.textContent = line;
-      logsEl.appendChild(div);
-    });
-    logsEl.scrollTop = logsEl.scrollHeight;
+    lastData = { status, pairs };
+    render(lastData);
   } catch (err) {
     console.error(err);
-    document.getElementById("updated").textContent = "שגיאה בטעינה: " + err.message;
+    document.getElementById("subtitle").textContent = "⚠ " + err.message;
   }
 }
 
+function render({ status, pairs }) {
+  // Service pill
+  const svc = status.service || {};
+  const pill = document.getElementById("service-pill");
+  pill.className = "pill pill-dot " + (
+    svc.active === "active" ? "pill-success" :
+    svc.active === "failed" ? "pill-danger" : "pill-gray"
+  );
+  const label =
+    svc.active === "active" ? t("status.running") :
+    svc.active === "failed" ? t("status.failed") : t("status.unknown");
+  const uptime = svc.uptime_sec ? ` · ${fmtUptime(svc.uptime_sec)}` : "";
+  pill.textContent = label + uptime;
+
+  // Subtitle
+  document.getElementById("subtitle").textContent =
+    `${t("subtitle.updated")}: ${fmtTs(status.server_time)}`;
+
+  // Stats
+  const bal = status.latest_balance_usd;
+  document.getElementById("balance").textContent = bal == null ? "—" : `$${bal.toFixed(2)}`;
+  document.getElementById("count-confirmed").textContent = pairs.counts.confirmed;
+  document.getElementById("count-pending").textContent = pairs.counts.pending;
+  document.getElementById("count-discovered").textContent = pairs.counts.discovered;
+  document.getElementById("pairs-count").textContent =
+    pairs.counts.discovered + (LANG === "he" ? " זוגות" : " pairs");
+
+  // Pair cards (sort: confirmed first, then by profit%, then by discovery order)
+  const list = Array.isArray(pairs.discovered) ? pairs.discovered.slice() : [];
+  // Enrich with tier from confirmed/pending/rejected lookups
+  list.forEach(p => {
+    const key = p.pair_key;
+    if (pairs.confirmed && pairs.confirmed[key]) p.tier = "confirmed";
+    else if (pairs.pending && pairs.pending[key]) p.tier = "pending";
+    else if (pairs.rejected && pairs.rejected[key]) p.tier = "rejected";
+    else p.tier = "probe";
+  });
+  list.sort((a, b) => {
+    const tierOrder = { confirmed: 0, pending: 1, probe: 2, rejected: 3 };
+    const ta = tierOrder[a.tier] ?? 4;
+    const tb = tierOrder[b.tier] ?? 4;
+    if (ta !== tb) return ta - tb;
+    const pa = (a.live && a.live.entry_profit_pct) ?? -Infinity;
+    const pb = (b.live && b.live.entry_profit_pct) ?? -Infinity;
+    return pb - pa;
+  });
+
+  const host = document.getElementById("pairs");
+  if (list.length === 0) {
+    host.innerHTML = `
+      <div class="empty" style="grid-column: 1 / -1">
+        <div class="empty-icon">🔭</div>
+        <h3>${t("empty.title")}</h3>
+        <p>${t("empty.body")}</p>
+      </div>`;
+  } else {
+    host.innerHTML = list.map(renderPairCard).join("");
+  }
+}
+
+applyLanguage();
 refresh();
 setInterval(refresh, 10_000);
 </script>

@@ -113,6 +113,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.CONFIRMED_FILE = os.path.join("data", "confirmed_pairs.json")
         self.PENDING_FILE = os.path.join("data", "pending_confirmation.json")
         self.REJECTED_FILE = os.path.join("data", "rejected_pairs.json")
+        # Live price snapshot: dashboard reads this file to render pair cards
+        # with current ask/bid and running profit %.
+        self.PRICE_SNAPSHOT_FILE = os.path.join("data", "price_snapshot.json")
         self.confirmed_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.CONFIRMED_FILE)
         self.pending_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.PENDING_FILE)
         self.rejected_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.REJECTED_FILE)
@@ -721,6 +724,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # --- Monitoring Phase ---
         self.logger.info(f"📈 Checking prices for {len(self.discovered_pairs)} saved pairs...")
         opportunities = []
+        import time as _time
+        price_snapshot: Dict[str, Any] = {}
+        snapshot_now = _time.time()
+
         for pair in self.discovered_pairs:
             early, late = market_map.get(pair['early_id']), market_map.get(pair['late_id'])
             if not early or not late: continue
@@ -733,16 +740,55 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             no_early, yes_late = tid_early[1], tid_late[0]
             ask_no, ask_yes = self._best_ask(no_early), self._best_ask(yes_late)
-            if not ask_no or not ask_yes: continue
+            bid_no, bid_yes = self._best_bid(no_early), self._best_bid(yes_late)
 
+            pair_key = self._pair_key(pair['early_id'], pair['late_id'])
+            days = self._days_until_close(late.get("endDate"))
+            tier = self._get_tier_status(pair['early_id'], pair['late_id'])
+
+            # Build snapshot entry for this pair (even if no arb opportunity right
+            # now — the dashboard still wants to render it).
+            snap_entry: Dict[str, Any] = {
+                "pair_key": pair_key,
+                "early_id": pair['early_id'],
+                "late_id": pair['late_id'],
+                "early_question": early.get('question', ''),
+                "late_question": late.get('question', ''),
+                "early_end": early.get('endDate'),
+                "late_end": late.get('endDate'),
+                "days_until_close": days,
+                "tier": tier,
+                "discovery_method": pair.get("discovery_method", "llm"),
+                "resolution_match_confidence": pair.get("resolution_match_confidence"),
+                "updated_at": snapshot_now,
+            }
+            if ask_no and ask_yes:
+                total_cost = ask_no["price"] + ask_yes["price"]
+                snap_entry.update({
+                    "ask_no_early": ask_no["price"],
+                    "ask_yes_late": ask_yes["price"],
+                    "total_cost": total_cost,
+                    "entry_profit_usd": round(1.0 - total_cost, 4),
+                    "entry_profit_pct": round((1.0 - total_cost) * 100, 2),
+                    "annualized_roi": round(
+                        self._calculate_annualized_roi(1.0 - total_cost, days) * 100, 2
+                    ),
+                })
+            if bid_no and bid_yes:
+                exit_value = bid_no["price"] + bid_yes["price"]
+                snap_entry["bid_no_early"] = bid_no["price"]
+                snap_entry["bid_yes_late"] = bid_yes["price"]
+                snap_entry["exit_value"] = round(exit_value, 4)
+            price_snapshot[pair_key] = snap_entry
+
+            # Arb decision path (unchanged from previous version)
+            if not ask_no or not ask_yes: continue
             total_cost = ask_no["price"] + ask_yes["price"]
             if total_cost < (1.0 - (self.min_profit_threshold + 2*self.estimated_fee)):
                 if self._has_invalid_risk(early) or self._has_invalid_risk(late): continue
-                
-                days = self._days_until_close(late.get("endDate"))
+
                 roi = self._calculate_annualized_roi(1.0 - total_cost, days)
                 if roi >= self.min_annualized_roi:
-                    tier = self._get_tier_status(pair['early_id'], pair['late_id'])
                     if tier == "rejected":
                         continue  # user-blacklisted
                     if tier == "pending":
@@ -762,7 +808,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "days_until_close": days,
                         "size": size,
                         "tier": tier,
-                        "pair_key": self._pair_key(pair['early_id'], pair['late_id']),
+                        "pair_key": pair_key,
                         "early_id": pair['early_id'], "late_id": pair['late_id'],
                         "early_desc": early.get("description", ""),
                         "late_desc": late.get("description", ""),
@@ -770,6 +816,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "annualized_roi": roi, "llm_reason": pair.get("description", ""),
                         "early_question": early['question'], "late_question": late['question']
                     })
+
+        # Persist snapshot for the dashboard
+        self._save_json_state(self.PRICE_SNAPSHOT_FILE, price_snapshot)
         return opportunities
 
     async def should_enter(self, opportunity: Dict[str, Any]) -> bool:

@@ -36,6 +36,8 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+LOGS_HTML = Path(__file__).resolve().parent / "logs.html"
+ENV_HTML = Path(__file__).resolve().parent / "env.html"
 
 
 def _read_json(path: Path, default):
@@ -176,6 +178,20 @@ def index():
     return HTMLResponse("<h1>Polybot Dashboard</h1><p>index.html missing.</p>")
 
 
+@app.get("/logs", response_class=HTMLResponse)
+def logs_page():
+    if LOGS_HTML.exists():
+        return HTMLResponse(LOGS_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Logs</h1><p>logs.html missing.</p>")
+
+
+@app.get("/env", response_class=HTMLResponse)
+def env_page():
+    if ENV_HTML.exists():
+        return HTMLResponse(ENV_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Env</h1><p>env.html missing.</p>")
+
+
 @app.get("/api/status")
 def api_status():
     log = _latest_bot_log()
@@ -188,12 +204,20 @@ def api_status():
     })
 
 
+def _pair_key(early_id: str, late_id: str) -> str:
+    """Mirror of CalendarArbitrageStrategy._pair_key so the dashboard can
+    cross-reference price snapshots without importing the strategy module."""
+    a, b = sorted((str(early_id), str(late_id)))
+    return f"{a[:12]}__{b[:12]}"
+
+
 @app.get("/api/pairs")
 def api_pairs():
     discovered = _read_json(DATA_DIR / "discovered_pairs.json", [])
     confirmed = _read_json(DATA_DIR / "confirmed_pairs.json", {})
     pending = _read_json(DATA_DIR / "pending_confirmation.json", {})
     rejected = _read_json(DATA_DIR / "rejected_pairs.json", {})
+    price_snapshot = _read_json(DATA_DIR / "price_snapshot.json", {})
     # Ensure lists/dicts
     if not isinstance(discovered, list):
         discovered = []
@@ -203,6 +227,18 @@ def api_pairs():
         pending = {}
     if not isinstance(rejected, dict):
         rejected = {}
+    if not isinstance(price_snapshot, dict):
+        price_snapshot = {}
+
+    # Enrich each discovered pair with its live-price entry (if the bot has
+    # scanned it recently). The frontend uses this to render cards with
+    # current ask/bid/total_cost/profit without a second round-trip.
+    for p in discovered:
+        key = _pair_key(p.get("early_id", ""), p.get("late_id", ""))
+        p["pair_key"] = key
+        if key in price_snapshot:
+            p["live"] = price_snapshot[key]
+
     return JSONResponse({
         "discovered": discovered,
         "confirmed": confirmed,
