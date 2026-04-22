@@ -127,8 +127,8 @@ Examples:
 
     parser.add_argument(
         '--llm-model',
-        default='gemini-2.5-flash',
-        help='Gemini model to use (default: gemini-2.5-flash)'
+        default='gemini-2.5-flash-lite',
+        help='Gemini model to use (default: gemini-2.5-flash-lite)'
     )
     
     # Database options
