@@ -947,7 +947,55 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # PURGE_AFTER_MISSING_SCANS consecutive scans. Runs after the
         # monitoring loop so we have an accurate healthy_pair_keys set.
         self._cleanup_expired_pairs(healthy_pair_keys)
+
+        # Dashboard heartbeat. Lives here (end of scan()) rather than in
+        # the legacy run() loop because BaseStrategy.scan_loop() is what
+        # actually drives scanning — run() is dead code kept around for
+        # backward compat. Without this call the dashboard never gets a
+        # status_snapshot.json and falls back to log-scraping for balance.
+        await self._write_heartbeat_snapshot()
         return opportunities
+
+    async def _write_heartbeat_snapshot(self):
+        """Writes data/status_snapshot.json with balance + stats + strategy
+        config so the dashboard can render a fresh overview every 10s
+        without re-reading the bot log. Failures are swallowed at WARNING
+        level — a broken heartbeat must never take the bot down."""
+        try:
+            import time as _time
+            bal = await self.executor.get_balance()
+            snapshot = {
+                "balance_usd": float(bal) if bal is not None else None,
+                "updated_at": _time.time(),
+                "loop": int(self.stats.get("scans", 0)),
+                "scan_interval_s": int(self.scan_interval),
+                "stats": {
+                    "trades_entered": int(self.stats.get("trades_entered", 0)),
+                    "trades_exited": int(self.stats.get("trades_exited", 0)),
+                },
+                "open_positions": len(getattr(self, "open_positions", {}) or {}),
+                "pair_counts": {
+                    "discovered": len(self.discovered_pairs),
+                    "confirmed": len(self.confirmed_pairs),
+                    "pending": len(self.pending_pairs),
+                    "rejected": len(self.rejected_pairs),
+                },
+                "strategy": {
+                    "name": "CalendarArbitrage",
+                    "min_profit_threshold": float(self.min_profit_threshold),
+                    "early_exit_threshold": float(self.early_exit_threshold),
+                    "min_annualized_roi": float(self.min_annualized_roi),
+                    "estimated_fee": float(self.estimated_fee),
+                    "probe_usd": float(self.probe_usd),
+                    "confirmed_usd": float(self.confirmed_usd),
+                    "llm_model": str(self.llm_model) if self.use_llm else None,
+                },
+            }
+            self._save_json_state(
+                os.path.join("data", "status_snapshot.json"), snapshot
+            )
+        except Exception as e:
+            self.logger.warning(f"Heartbeat snapshot failed: {e}")
 
     async def should_enter(self, opportunity: Dict[str, Any]) -> bool:
         # Basic sanity + we already used orderbook asks, so thresholds are conservative
