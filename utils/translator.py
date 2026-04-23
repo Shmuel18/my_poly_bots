@@ -33,7 +33,12 @@ logger = logging.getLogger(__name__)
 TRANSLATIONS_FILE = os.path.join("data", "translations.json")
 BATCH_SIZE = 10
 MAX_BATCHES_PER_FLUSH = 1  # share daily quota with the discovery LLM
-MODEL_NAME = "gemini-2.5-flash-lite"
+# Use a different model than the discovery agent so the translator
+# doesn't contend with it for the same per-minute Gemini quota. Free-tier
+# limits are per-model; gemini-2.0-flash-lite has 30 RPM of headroom
+# while the discovery agent already saturates gemini-2.5-flash-lite at
+# 20 RPM. Override via TRANSLATOR_MODEL env var if needed.
+MODEL_NAME = os.getenv("TRANSLATOR_MODEL", "gemini-2.0-flash-lite")
 TIMEOUT_SEC = 30.0
 
 
