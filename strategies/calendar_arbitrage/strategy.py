@@ -130,6 +130,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 self.logger.warning(f"Telegram init failed: {e}")
                 self.telegram = None
 
+        # Hebrew translator (shares GEMINI_API_KEY with the discovery LLM,
+        # but throttled to one batch/scan so it never starves discovery).
+        # Disabled automatically if no GEMINI_API_KEY is set.
+        self.translator = None
+        try:
+            from utils.translator import GeminiTranslator
+            self.translator = GeminiTranslator()
+        except Exception as e:
+            self.logger.warning(f"Translator init failed: {e}")
+            self.translator = None
+
         # 3. טעינת זוגות שנשמרו מהעבר
         self.discovered_pairs = self._load_discovered_pairs()
 
@@ -898,12 +909,21 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             # Build snapshot entry for this pair (even if no arb opportunity right
             # now — the dashboard still wants to render it).
+            early_q = early.get('question', '')
+            late_q = late.get('question', '')
+            # Cap descriptions — some Gamma entries run many KB and we don't
+            # want the snapshot (or the translator request) to blow up.
+            early_desc = (early.get('description') or '')[:400]
+            late_desc = (late.get('description') or '')[:400]
+
             snap_entry: Dict[str, Any] = {
                 "pair_key": pair_key,
                 "early_id": pair['early_id'],
                 "late_id": pair['late_id'],
-                "early_question": early.get('question', ''),
-                "late_question": late.get('question', ''),
+                "early_question": early_q,
+                "late_question": late_q,
+                "early_desc": early_desc,
+                "late_desc": late_desc,
                 "early_end": early.get('endDate'),
                 "late_end": late.get('endDate'),
                 "days_until_close": days,
@@ -919,6 +939,22 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "late_event_slug": self._event_slug(late),
                 "updated_at": snapshot_now,
             }
+            # Attach cached Hebrew translations (no-op if translator is
+            # disabled). Missing strings get queued for the next flush so
+            # they'll appear on a later scan.
+            if self.translator is not None:
+                for f_src, f_he in (
+                    ("early_question", "early_question_he"),
+                    ("late_question", "late_question_he"),
+                    ("early_desc", "early_desc_he"),
+                    ("late_desc", "late_desc_he"),
+                ):
+                    src = snap_entry.get(f_src) or ""
+                    if src:
+                        self.translator.queue(src)
+                        he = self.translator.lookup(src)
+                        if he:
+                            snap_entry[f_he] = he
             if ask_no and ask_yes:
                 total_cost = ask_no["price"] + ask_yes["price"]
                 snap_entry.update({
@@ -989,6 +1025,15 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # pair-alerts or process ✅/❌ replies.
         await self._check_escalations(market_map)
         await self._process_telegram_replies()
+
+        # Flush any Hebrew translations queued while building snap_entries.
+        # Throttled internally to one Gemini batch per scan to respect the
+        # shared free-tier quota.
+        if self.translator is not None:
+            try:
+                await self.translator.flush()
+            except Exception as e:
+                self.logger.debug(f"Translator flush failed: {e}")
 
         # Dashboard heartbeat — writes data/status_snapshot.json.
         await self._write_heartbeat_snapshot()
