@@ -200,6 +200,24 @@ class CalendarArbitrageStrategy(BaseStrategy):
         a, b = sorted((str(early_id), str(late_id)))
         return f"{a[:12]}__{b[:12]}"
 
+    @staticmethod
+    def _event_slug(market: Dict[str, Any]) -> Optional[str]:
+        """Extract the parent event's slug from a Gamma market dict.
+
+        Gamma markets carry an ``events`` array; the first event's ``slug``
+        powers the canonical URL ``https://polymarket.com/event/<slug>``.
+        Returns None if the shape is unexpected so the dashboard can hide
+        the link gracefully.
+        """
+        events = market.get("events") or []
+        if isinstance(events, list) and events:
+            first = events[0]
+            if isinstance(first, dict):
+                slug = first.get("slug")
+                if isinstance(slug, str) and slug:
+                    return slug
+        return None
+
     def _get_tier_status(self, early_id: str, late_id: str) -> str:
         """Returns one of: 'rejected', 'confirmed', 'pending', 'probe'."""
         key = self._pair_key(early_id, late_id)
@@ -790,6 +808,13 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "tier": tier,
                 "discovery_method": pair.get("discovery_method", "llm"),
                 "resolution_match_confidence": pair.get("resolution_match_confidence"),
+                # Slugs power per-leg Polymarket links on the dashboard. We
+                # refresh them every scan from the live market map so legacy
+                # pairs pick them up without a migration.
+                "early_slug": early.get("slug"),
+                "late_slug": late.get("slug"),
+                "early_event_slug": self._event_slug(early),
+                "late_event_slug": self._event_slug(late),
                 "updated_at": snapshot_now,
             }
             if ask_no and ask_yes:

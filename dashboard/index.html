@@ -203,6 +203,19 @@
     font-size: 14px; color: var(--text); font-weight: 500;
     line-height: 1.4;
   }
+  /* Per-leg Polymarket link. Rendered inline with the question text so RTL/LTR
+     flows follow the surrounding content; the SVG itself is direction-neutral. */
+  .ext-link {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 20px; height: 20px;
+    margin: 0 4px;
+    border-radius: 4px;
+    color: var(--text-muted);
+    vertical-align: -3px;
+    transition: color 0.12s, background 0.12s;
+  }
+  .ext-link:hover { color: var(--primary); background: var(--primary-soft); }
+  .ext-link svg { width: 12px; height: 12px; display: block; }
   .divider { height: 1px; background: var(--border); margin: 0; }
 
   .stats-row {
@@ -350,6 +363,7 @@ const I18N = {
     "source.regex": "זיהוי אוטומטי",
     "source.llm": "זוהה ע״י AI",
     "source.user": "אושר על ידך",
+    "card.openOnPolymarket": "פתח בפולימרקט",
     "empty.title": "הבוט סורק שווקים…",
     "empty.body": "זוגות יופיעו כאן ברגע שיזוהו.",
     "status.running": "פועל",
@@ -379,6 +393,7 @@ const I18N = {
     "source.regex": "Auto-matched",
     "source.llm": "AI-matched",
     "source.user": "User approved",
+    "card.openOnPolymarket": "Open on Polymarket",
     "empty.title": "Bot is scanning markets…",
     "empty.body": "Pairs will appear here once detected.",
     "status.running": "Running",
@@ -429,6 +444,29 @@ const fmtDate = iso => {
   } catch { return iso.slice(0, 10); }
 };
 const clampPct = x => Math.max(0, Math.min(100, x || 0));
+
+/* Build a Polymarket event URL from the slugs written into the price
+   snapshot by strategy.py. Prefer the event slug (the canonical landing
+   page) and fall back to the market slug if the event one is missing.
+   Returns null when neither is available — the icon is then skipped. */
+function pmUrl(eventSlug, marketSlug) {
+  const s = eventSlug || marketSlug;
+  if (!s || typeof s !== "string") return null;
+  return `https://polymarket.com/event/${encodeURIComponent(s)}`;
+}
+
+function legLink(eventSlug, marketSlug) {
+  const url = pmUrl(eventSlug, marketSlug);
+  if (!url) return "";
+  const label = escapeHtml(t("card.openOnPolymarket"));
+  // SVG: an "external-link" glyph (arrow escaping a box). Inline so it
+  // inherits currentColor for hover theming without extra assets.
+  return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="ext-link" dir="ltr" title="${label}" aria-label="${label}">`
+       + `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`
+       + `<path d="M5.5 2.5h6v6"/><path d="M11.5 2.5L6 8"/>`
+       + `<path d="M9 8v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h3"/>`
+       + `</svg></a>`;
+}
 
 function sourcePill(p) {
   const method = p.discovery_method || "llm";
@@ -495,11 +533,11 @@ function renderPairCard(p) {
       <div>
         <div class="leg">
           <span class="leg-label">${t("leg.early")}</span>
-          <span class="leg-q">${escapeHtml(p.early_question || live.early_question || "—")}</span>
+          <span class="leg-q">${escapeHtml(p.early_question || live.early_question || "—")}${legLink(live.early_event_slug, live.early_slug)}</span>
         </div>
         <div class="leg" style="margin-top:6px">
           <span class="leg-label">${t("leg.late")}</span>
-          <span class="leg-q">${escapeHtml(live.late_question || "—")}</span>
+          <span class="leg-q">${escapeHtml(live.late_question || "—")}${legLink(live.late_event_slug, live.late_slug)}</span>
         </div>
       </div>
       <div class="divider"></div>
