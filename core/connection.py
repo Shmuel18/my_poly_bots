@@ -146,35 +146,52 @@ class PolymarketConnection:
             logger.info("[DEBUG] Polymarket Init: api_key=%s... api_secret=%s... api_passphrase=%s...", api_key[:6], api_secret[:6], api_passphrase[:6])
             logger.info("[DEBUG] private_key=%s... funder_address=%s", str(private_key)[:8], str(funder_address))
 
-            creds = ApiCreds(
-                api_key=api_key.strip(),
-                api_secret=api_secret.strip(),
-                api_passphrase=api_passphrase.strip()
-            )
-
             # Determine signature type dynamically
             sig_type = 1 if funder_address else 0
             logger.info(f"[DEBUG] signature_type={sig_type} (1=Proxy, 0=EOA)")
 
-            # Initialize CLOB client
+            # Initialize CLOB client. If api_secret/passphrase are missing or
+            # empty, we'll derive them from the private key after init.
             try:
                 self.client = ClobClient(
                     host=clob_url,
                     key=private_key,
                     chain_id=chain_id,
-                    creds=creds,
                     signature_type=sig_type,
-                    funder=funder_address if sig_type == 1 else None
+                    funder=funder_address if sig_type == 1 else None,
                 )
             except Exception as e:
                 logger.error(f"[DEBUG] ClobClient init failed: {e}")
                 raise
 
-            try:
-                self.client.set_api_creds(creds)
-            except Exception as e:
-                logger.error(f"[DEBUG] set_api_creds failed: {e}")
-                raise
+            # Attach API creds. Prefer explicit creds from .env; fall back to
+            # deriving them from the private key (py-clob-client signs a
+            # deterministic message to request/recover the L2 credentials).
+            creds = None
+            if api_key and api_secret and api_passphrase:
+                creds = ApiCreds(
+                    api_key=api_key.strip(),
+                    api_secret=api_secret.strip(),
+                    api_passphrase=api_passphrase.strip(),
+                )
+                try:
+                    self.client.set_api_creds(creds)
+                    logger.info("[DEBUG] Attached explicit CLOB creds from .env")
+                except Exception as e:
+                    logger.warning(f"[DEBUG] set_api_creds failed with explicit creds: {e}; will try derive")
+                    creds = None
+
+            if creds is None:
+                try:
+                    derived = self.client.create_or_derive_api_creds(nonce=0)
+                    self.client.set_api_creds(derived)
+                    logger.info(
+                        f"[DEBUG] Derived CLOB creds from private key — "
+                        f"api_key={derived.api_key}"
+                    )
+                except Exception as e:
+                    logger.error(f"[DEBUG] create_or_derive_api_creds failed: {e}")
+                    raise
 
             # Cache for balance
             self._balance_cache: Optional[float] = None
