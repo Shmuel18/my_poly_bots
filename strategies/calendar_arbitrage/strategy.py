@@ -1584,6 +1584,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                             "balance_usd": float(bal) if bal is not None else None,
                             "updated_at": _time.time(),
                             "loop": loop_count,
+                            "scan_interval_s": int(self.scan_interval),
                             "stats": {
                                 "trades_entered": int(self.stats.get("trades_entered", 0)),
                                 "trades_exited": int(self.stats.get("trades_exited", 0)),
@@ -1594,6 +1595,16 @@ class CalendarArbitrageStrategy(BaseStrategy):
                                 "confirmed": len(self.confirmed_pairs),
                                 "pending": len(self.pending_pairs),
                                 "rejected": len(self.rejected_pairs),
+                            },
+                            "strategy": {
+                                "name": "CalendarArbitrage",
+                                "min_profit_threshold": float(self.min_profit_threshold),
+                                "early_exit_threshold": float(self.early_exit_threshold),
+                                "min_annualized_roi": float(self.min_annualized_roi),
+                                "estimated_fee": float(self.estimated_fee),
+                                "probe_usd": float(self.probe_usd),
+                                "confirmed_usd": float(self.confirmed_usd),
+                                "llm_model": str(self.llm_model) if self.use_llm else None,
                             },
                         }
                         self._save_json_state(
