@@ -3,206 +3,270 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>botview.live</title>
+<title>PolyBot · botview.live</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Assistant:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #f5f5f5;
-    --card: #ffffff;
-    --border: #e5e7eb;
-    --border-strong: #d1d5db;
-    --text: #1a1d29;
-    --text-secondary: #6b7280;
-    --text-muted: #9ca3af;
-    --primary: #1652f0;
-    --primary-hover: #0d3bc7;
-    --primary-soft: #eaf0ff;
-    --success: #0b8c3d;
-    --success-soft: #dcfce7;
-    --danger: #dc2626;
-    --danger-soft: #fee2e2;
-    --warning: #d97706;
-    --warning-soft: #fef3c7;
-    --radius: 12px;
-    --radius-sm: 8px;
-    --shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-    --shadow-hover: 0 4px 12px rgba(0,0,0,0.08);
+    --bg: #fafaf9;
+    --panel: #ffffff;
+    --panel-alt: #f7f7f5;
+    --border: #ececea;
+    --border-strong: #dedcd8;
+    --text: #1a1a1a;
+    --text-2: #525252;
+    --text-3: #8a8a85;
+    --green: #0e9f6e;
+    --green-bg: #e7f7f0;
+    --green-strong: #047857;
+    --red: #dc2626;
+    --red-bg: #fdeaea;
+    --red-strong: #b91c1c;
+    --blue: #2563eb;
+    --blue-bg: #e8efff;
+    --amber: #b45309;
+    --amber-bg: #fef3c7;
+    --purple-bg: #f3e8ff;
+    --purple-strong: #7e22ce;
+    --shadow-sm: 0 1px 2px rgba(20,20,20,0.04);
+    --shadow-md: 0 2px 8px rgba(20,20,20,0.05);
+    --radius: 8px;
+    --radius-lg: 10px;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; }
+  html, body { margin: 0; padding: 0; height: 100vh; }
   body {
+    font-family: 'Assistant', 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
     background: var(--bg);
     color: var(--text);
-    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, Arial, sans-serif;
     font-size: 14px;
-    line-height: 1.5;
+    line-height: 1.45;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
   }
+  body.ltr { direction: ltr; font-family: 'Inter', 'Assistant', system-ui, sans-serif; }
   body.rtl { direction: rtl; }
-  body.ltr { direction: ltr; }
+  .mono { font-family: 'JetBrains Mono', ui-monospace, monospace; font-variant-numeric: tabular-nums; }
   .num { font-variant-numeric: tabular-nums; font-feature-settings: "tnum"; }
   a { color: inherit; text-decoration: none; }
+  button { font-family: inherit; cursor: pointer; border: 0; background: none; color: inherit; padding: 0; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: #dedcd8; border-radius: 6px; border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-thumb:hover { background: #c5c3bd; }
 
-  /* Header */
-  .header {
-    position: sticky; top: 0; z-index: 50;
-    background: var(--card);
-    border-bottom: 1px solid var(--border);
-    height: 56px;
-    display: flex;
-    align-items: center;
-    padding: 0 20px;
-    gap: 24px;
+  @keyframes pulseDot { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+  /* ============ TOPBAR ============ */
+  .topbar {
+    height: 56px; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; padding: 0 20px; gap: 20px; flex-shrink: 0;
+    z-index: 10;
   }
-  .logo {
-    display: flex; align-items: center; gap: 8px;
-    font-weight: 800; font-size: 17px; letter-spacing: -0.01em;
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand-logo {
+    width: 28px; height: 28px; border-radius: 7px; background: var(--text);
+    display: grid; place-items: center; color: #fff;
+    font-weight: 800; font-size: 14px; font-family: 'JetBrains Mono', monospace;
   }
-  .logo .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--primary); }
-  .nav {
-    display: flex; gap: 4px; flex: 1;
+  .brand-text { display: flex; flex-direction: column; line-height: 1.15; }
+  .brand-name { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
+  .brand-sub { font-size: 10px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; margin-top: -2px; }
+
+  .topbar-spacer { flex: 1; }
+
+  .status-group { display: flex; align-items: center; gap: 12px; }
+  .service-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 10px; border-radius: 6px;
+    background: var(--panel-alt); border: 1px solid var(--border);
+    font-size: 12px; color: var(--text-2);
   }
-  .nav a {
-    padding: 6px 12px; border-radius: var(--radius-sm);
-    font-weight: 500; color: var(--text-secondary);
-    transition: background 0.12s, color 0.12s;
-  }
-  .nav a:hover { background: var(--bg); color: var(--text); }
-  .nav a.active { background: var(--primary-soft); color: var(--primary); }
-  .header-right {
-    display: flex; align-items: center; gap: 10px;
-  }
-  .pill {
-    display: inline-flex; align-items: center; gap: 4px;
-    padding: 3px 10px; border-radius: 9999px;
-    font-size: 12px; font-weight: 600;
-    line-height: 1.4;
-  }
-  .pill-dot::before {
-    content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor;
+  .service-pill .dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--text-3);
     display: inline-block;
   }
-  .pill-success { background: var(--success-soft); color: var(--success); }
-  .pill-danger { background: var(--danger-soft); color: var(--danger); }
-  .pill-warning { background: var(--warning-soft); color: var(--warning); }
-  .pill-primary { background: var(--primary-soft); color: var(--primary); }
-  .pill-gray { background: #f3f4f6; color: #4b5563; }
+  .service-pill.is-active .dot { background: var(--green); animation: pulseDot 2s ease-in-out infinite; }
+  .service-pill.is-failed .dot { background: var(--red); }
+  .service-pill .mono-sub { color: var(--text-3); font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+
   .lang-toggle {
-    border: 1px solid var(--border);
-    border-radius: var(--radius-sm);
     display: inline-flex;
-    overflow: hidden;
-    font-weight: 600; font-size: 12px;
+    border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
   }
   .lang-toggle button {
-    border: 0; background: transparent; color: var(--text-secondary);
-    padding: 4px 10px; cursor: pointer; font-family: inherit; font-weight: 600;
+    padding: 5px 10px; font-size: 11px; font-weight: 600;
+    color: var(--text-3); font-family: 'JetBrains Mono', monospace;
+    transition: background 0.12s, color 0.12s;
   }
   .lang-toggle button.active { background: var(--text); color: #fff; }
 
-  /* Layout */
-  main { max-width: 1280px; margin: 0 auto; padding: 24px 20px 48px; }
-  .page-title {
-    font-size: 22px; font-weight: 700; letter-spacing: -0.01em;
-    margin: 0 0 4px 0;
-  }
-  .page-subtitle { color: var(--text-secondary); font-size: 13px; margin-bottom: 20px; }
+  /* ============ BODY LAYOUT ============ */
+  .body-row { display: flex; flex: 1; min-height: 0; }
 
-  /* Hero stats */
-  .stats {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 12px;
-    margin-bottom: 20px;
+  /* ============ SIDEBAR ============ */
+  .sidebar {
+    width: 224px; background: var(--panel);
+    border-inline-start: 1px solid var(--border);
+    display: flex; flex-direction: column; flex-shrink: 0;
+    overflow-y: auto;
   }
-  .stat-card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 16px 18px;
-    box-shadow: var(--shadow);
+  .nav-section { padding: 14px 12px 6px; }
+  .nav-label {
+    font-size: 10px; font-weight: 700; color: var(--text-3);
+    letter-spacing: 0.08em; padding: 0 8px 6px;
+    font-family: 'JetBrains Mono', monospace;
   }
-  .stat-label {
-    font-size: 12px; color: var(--text-secondary);
-    text-transform: uppercase; letter-spacing: 0.04em;
-    font-weight: 600;
-    margin-bottom: 6px;
+  .nav-btn {
+    width: 100%; padding: 9px 10px; border-radius: 7px;
+    display: flex; align-items: center; gap: 10px;
+    font-size: 13px; font-weight: 500;
+    color: var(--text-2); text-align: start; margin-bottom: 1px;
+    border-inline-end: 2px solid transparent;
+    transition: background 0.12s, color 0.12s;
   }
-  .stat-value {
-    font-size: 26px; font-weight: 700; letter-spacing: -0.02em;
-    color: var(--text);
+  .nav-btn:hover { background: var(--panel-alt); color: var(--text); }
+  .nav-btn.active { background: var(--panel-alt); color: var(--text); border-inline-end-color: var(--text); }
+  .nav-btn-icon {
+    font-family: 'JetBrains Mono', monospace; font-size: 14px;
+    width: 16px; text-align: center; color: var(--text-3); flex-shrink: 0;
   }
-  .stat-value.success { color: var(--success); }
-  .stat-value.warning { color: var(--warning); }
-  .stat-value.danger { color: var(--danger); }
-  .stat-delta { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+  .nav-btn.active .nav-btn-icon { color: var(--text); }
+  .nav-btn-label { flex: 1; }
+  .nav-badge {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; font-weight: 600;
+    padding: 2px 6px; border-radius: 10px;
+    background: var(--panel-alt); color: var(--text-2); border: 1px solid var(--border);
+  }
+  .nav-badge.green { background: var(--green-bg); color: var(--green-strong); border-color: transparent; }
+
+  .strat-row {
+    padding: 8px 10px; border-radius: 7px; margin-bottom: 2px;
+    display: flex; align-items: center; gap: 8px; font-size: 12px;
+  }
+  .strat-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
+  .strat-name { flex: 1; font-weight: 500; }
+  .strat-count {
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-3); font-weight: 600;
+  }
+
+  .sidebar-spacer { flex: 1; }
+  .sidebar-footer {
+    padding: 12px; border-top: 1px solid var(--border);
+    font-size: 11px; color: var(--text-3);
+    display: flex; justify-content: space-between; gap: 6px;
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* ============ MAIN ============ */
+  main {
+    flex: 1; overflow-y: auto; padding: 20px;
+    background: var(--bg);
+  }
+  .page-head {
+    display: flex; justify-content: space-between; align-items: flex-end;
+    gap: 12px; margin-bottom: 18px;
+  }
+  .eyebrow {
+    font-size: 11px; color: var(--text-3); font-weight: 600;
+    letter-spacing: 0.06em; font-family: 'JetBrains Mono', monospace;
+  }
+  .page-title {
+    font-size: 24px; font-weight: 700; letter-spacing: -0.02em; margin: 2px 0 0;
+  }
+  .page-updated {
+    font-size: 11px; color: var(--text-3);
+    font-family: 'JetBrains Mono', monospace;
+  }
+
+  /* KPI row */
+  .kpi-row {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px;
+    margin-bottom: 16px;
+  }
+  .kpi {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px;
+    display: flex; flex-direction: column; gap: 8px; min-height: 100px;
+  }
+  .kpi-label {
+    font-size: 11px; color: var(--text-3); font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .kpi-value {
+    font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1;
+    font-family: 'JetBrains Mono', monospace; color: var(--text);
+  }
+  .kpi-value.g { color: var(--green-strong); }
+  .kpi-value.r { color: var(--red-strong); }
+  .kpi-value.a { color: var(--amber); }
+  .kpi-sub { font-size: 12px; color: var(--text-2); margin-top: auto; }
 
   /* Section header */
-  .section-header {
-    display: flex; align-items: baseline; justify-content: space-between;
-    margin: 24px 0 12px;
+  .section-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    margin: 24px 0 10px;
   }
-  .section-title { font-size: 18px; font-weight: 700; margin: 0; letter-spacing: -0.01em; }
-  .section-count { color: var(--text-muted); font-size: 13px; font-weight: 500; }
+  .section-title { font-size: 15px; font-weight: 600; display: inline-flex; align-items: center; gap: 8px; }
+  .section-title .live-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+    animation: pulseDot 1.6s ease-in-out infinite;
+  }
+  .section-count {
+    font-size: 12px; color: var(--text-3);
+    font-family: 'JetBrains Mono', monospace;
+  }
 
-  /* Pair cards grid */
+  /* Pair cards */
   .pairs {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
-    gap: 14px;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 12px;
   }
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 18px;
-    box-shadow: var(--shadow);
-    transition: box-shadow 0.15s, transform 0.15s;
+  .pair {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-lg); padding: 16px;
     display: flex; flex-direction: column; gap: 12px;
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  .card:hover {
-    box-shadow: var(--shadow-hover);
-  }
-  .card-top {
-    display: flex; align-items: center; justify-content: space-between; gap: 8px;
-    flex-wrap: wrap;
-  }
-  .card-top-left { display: flex; gap: 6px; flex-wrap: wrap; }
-  .live-dot {
-    display: inline-flex; align-items: center; gap: 6px;
-    font-size: 11px; color: var(--text-muted); font-weight: 500;
-  }
-  .live-dot .dot {
-    width: 7px; height: 7px; border-radius: 50%;
-    background: var(--text-muted);
-  }
-  .live-dot.is-live .dot {
-    background: var(--success);
-    box-shadow: 0 0 0 3px rgba(11,140,61,0.15);
-    animation: pulse 2.4s ease-in-out infinite;
-  }
-  @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 3px rgba(11,140,61,0.15); }
-    50% { box-shadow: 0 0 0 5px rgba(11,140,61,0.05); }
-  }
+  .pair:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); }
+  .pair-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pair-pills { display: flex; gap: 6px; flex-wrap: wrap; }
 
-  .leg {
-    display: grid;
-    grid-template-columns: 52px 1fr;
-    align-items: baseline;
-    gap: 8px;
+  .pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; white-space: nowrap;
   }
+  .pill-gray { background: var(--panel-alt); color: var(--text-2); border: 1px solid var(--border); }
+  .pill-g { background: var(--green-bg); color: var(--green-strong); }
+  .pill-r { background: var(--red-bg); color: var(--red-strong); }
+  .pill-b { background: var(--blue-bg); color: var(--blue); }
+  .pill-a { background: var(--amber-bg); color: var(--amber); }
+  .pill-p { background: var(--purple-bg); color: var(--purple-strong); }
+
+  .pair-clock {
+    font-size: 11px; color: var(--text-3);
+    font-family: 'JetBrains Mono', monospace;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .pair-clock .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+  .pair-clock.is-live .dot { background: var(--green); animation: pulseDot 1.6s ease-in-out infinite; }
+
+  .leg { display: grid; grid-template-columns: 52px 1fr; align-items: baseline; gap: 8px; }
+  .leg + .leg { margin-top: 6px; }
   .leg-label {
-    font-size: 10px; font-weight: 700; color: var(--text-muted);
+    font-size: 10px; font-weight: 700; color: var(--text-3);
     letter-spacing: 0.08em; text-transform: uppercase;
+    font-family: 'JetBrains Mono', monospace;
   }
-  .leg-q {
-    font-size: 14px; color: var(--text); font-weight: 500;
-    line-height: 1.4;
-  }
+  .leg-q { font-size: 14px; color: var(--text); font-weight: 500; line-height: 1.4; }
+
   /* Per-leg Polymarket link. Rendered inline with the question text so RTL/LTR
      flows follow the surrounding content; the SVG itself is direction-neutral. */
   .ext-link {
@@ -210,92 +274,89 @@
     width: 20px; height: 20px;
     margin: 0 4px;
     border-radius: 4px;
-    color: var(--text-muted);
+    color: var(--text-3);
     vertical-align: -3px;
     transition: color 0.12s, background 0.12s;
   }
-  .ext-link:hover { color: var(--primary); background: var(--primary-soft); }
+  .ext-link:hover { color: var(--text); background: var(--panel-alt); }
   .ext-link svg { width: 12px; height: 12px; display: block; }
+
   .divider { height: 1px; background: var(--border); margin: 0; }
 
-  .stats-row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
+  .stats-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
   .stat-block .label {
-    font-size: 11px; color: var(--text-secondary);
-    font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em;
-    margin-bottom: 2px;
+    font-size: 10px; color: var(--text-3); font-weight: 600;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    margin-bottom: 2px; font-family: 'JetBrains Mono', monospace;
   }
   .stat-block .value {
     font-size: 20px; font-weight: 700; letter-spacing: -0.01em;
+    font-family: 'JetBrains Mono', monospace;
   }
-  .stat-block .value.success { color: var(--success); }
-  .stat-block .value.danger { color: var(--danger); }
+  .stat-block .value.g { color: var(--green-strong); }
+  .stat-block .value.r { color: var(--red-strong); }
 
-  .progress {
-    height: 6px; background: var(--border); border-radius: 9999px; overflow: hidden;
-    margin-top: 6px;
-  }
-  .progress-fill {
-    height: 100%; background: var(--primary); transition: width 0.3s;
-  }
-  .progress-fill.success { background: var(--success); }
-  .progress-fill.danger { background: var(--danger); }
+  .progress { height: 4px; background: var(--panel-alt); border-radius: 3px; overflow: hidden; }
+  .progress-fill { height: 100%; background: var(--text); transition: width 0.4s; }
+  .progress-fill.g { background: var(--green); }
+  .progress-fill.r { background: var(--red); }
 
   .meta-row {
     display: flex; gap: 8px; flex-wrap: wrap;
-    font-size: 11px; color: var(--text-muted); font-weight: 500;
+    font-size: 11px; color: var(--text-3);
+    font-family: 'JetBrains Mono', monospace;
   }
   .meta-sep { opacity: 0.5; }
+
   .placeholder {
-    font-size: 13px; color: var(--text-muted); font-style: italic;
-    padding: 8px 0;
+    font-size: 13px; color: var(--text-3); font-style: italic; padding: 6px 0;
   }
 
-  /* Empty state */
   .empty {
-    background: var(--card);
-    border: 1px dashed var(--border-strong);
-    border-radius: var(--radius);
-    padding: 48px 20px;
-    text-align: center;
-    color: var(--text-secondary);
+    background: var(--panel); border: 1px dashed var(--border-strong);
+    border-radius: var(--radius-lg); padding: 48px 20px;
+    text-align: center; color: var(--text-2);
+    grid-column: 1 / -1;
   }
-  .empty-icon { font-size: 40px; margin-bottom: 8px; opacity: 0.5; }
-  .empty h3 { margin: 0 0 6px; color: var(--text); font-size: 16px; }
+  .empty-icon { font-size: 32px; margin-bottom: 8px; opacity: 0.6; }
+  .empty h3 { margin: 0 0 6px; color: var(--text); font-size: 16px; font-weight: 600; }
   .empty p { margin: 0; font-size: 13px; }
 
   /* Responsive */
   @media (max-width: 1024px) {
-    .pairs { grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); }
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
   }
-  @media (max-width: 640px) {
-    .stats { grid-template-columns: repeat(2, 1fr); }
+  @media (max-width: 860px) {
+    .sidebar { display: none; }
+    .topbar { padding: 0 14px; gap: 10px; }
+    .brand-sub { display: none; }
+  }
+  @media (max-width: 560px) {
+    main { padding: 14px; }
+    .kpi { padding: 12px; min-height: 86px; }
+    .kpi-value { font-size: 22px; }
     .pairs { grid-template-columns: 1fr; }
-    .header { padding: 0 14px; gap: 12px; }
-    .nav { gap: 0; overflow-x: auto; -ms-overflow-style: none; scrollbar-width: none; }
-    .nav::-webkit-scrollbar { display: none; }
-    main { padding: 16px 14px 32px; }
-    .stat-value { font-size: 22px; }
+    .status-group .service-pill .mono-sub { display: none; }
   }
 </style>
 </head>
 <body class="rtl">
 
-<header class="header">
-  <a class="logo" href="/">
-    <span class="dot"></span>
-    <span>botview.live</span>
+<header class="topbar">
+  <a class="brand" href="/">
+    <div class="brand-logo">P</div>
+    <div class="brand-text">
+      <div class="brand-name">PolyBot</div>
+      <div class="brand-sub">botview.live · calendar-arb</div>
+    </div>
   </a>
-  <nav class="nav">
-    <a href="/" class="active" data-i18n="nav.home">ראשי</a>
-    <a href="/logs" data-i18n="nav.logs">לוגים</a>
-    <a href="/env" data-i18n="nav.env">הגדרות</a>
-  </nav>
-  <div class="header-right">
-    <span id="service-pill" class="pill pill-gray pill-dot">—</span>
+  <div class="topbar-spacer"></div>
+  <div class="status-group">
+    <div id="service-pill" class="service-pill">
+      <span class="dot"></span>
+      <span id="service-text">—</span>
+      <span class="mono-sub" id="service-uptime"></span>
+    </div>
     <div class="lang-toggle" role="group" aria-label="Language">
       <button type="button" data-lang="he">עב</button>
       <button type="button" data-lang="en">EN</button>
@@ -303,108 +364,171 @@
   </div>
 </header>
 
-<main>
-  <h1 class="page-title" data-i18n="page.title">הזדמנויות ארביטראז'</h1>
-  <p class="page-subtitle" id="subtitle">—</p>
+<div class="body-row">
 
-  <div class="stats">
-    <div class="stat-card">
-      <div class="stat-label" data-i18n="stat.balance">יתרת USDC</div>
-      <div id="balance" class="stat-value num">—</div>
-      <div id="balance-sub" class="stat-delta"></div>
+  <aside class="sidebar">
+    <div class="nav-section">
+      <div class="nav-label" data-i18n="sidebar.nav">ניווט</div>
+      <a href="/" class="nav-btn active">
+        <span class="nav-btn-icon">▦</span>
+        <span class="nav-btn-label" data-i18n="nav.home">ראשי</span>
+        <span id="nav-pair-count" class="nav-badge green">—</span>
+      </a>
+      <a href="/logs" class="nav-btn">
+        <span class="nav-btn-icon">≡</span>
+        <span class="nav-btn-label" data-i18n="nav.logs">לוגים</span>
+      </a>
+      <a href="/env" class="nav-btn">
+        <span class="nav-btn-icon">⚙</span>
+        <span class="nav-btn-label" data-i18n="nav.env">הגדרות</span>
+      </a>
     </div>
-    <div class="stat-card">
-      <div class="stat-label" data-i18n="stat.confirmed">זוגות פעילים</div>
-      <div id="count-confirmed" class="stat-value num success">—</div>
-      <div class="stat-delta" data-i18n="stat.confirmed.sub">נסחרים אוטומטית</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label" data-i18n="stat.pending">ממתינים לאישור</div>
-      <div id="count-pending" class="stat-value num warning">—</div>
-      <div class="stat-delta" data-i18n="stat.pending.sub">ב-Telegram</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label" data-i18n="stat.discovered">זוגות במעקב</div>
-      <div id="count-discovered" class="stat-value num">—</div>
-      <div class="stat-delta" id="discovery-sub"></div>
-    </div>
-  </div>
 
-  <div class="section-header">
-    <h2 class="section-title" data-i18n="section.pairs">זוגות מנוטרים</h2>
-    <span class="section-count" id="pairs-count">—</span>
-  </div>
+    <div class="nav-section">
+      <div class="nav-label" data-i18n="sidebar.strategies">אסטרטגיות פעילות</div>
+      <div class="strat-row">
+        <span class="strat-dot"></span>
+        <span class="strat-name">CalendarArbitrage</span>
+        <span id="strat-count" class="strat-count">—</span>
+      </div>
+    </div>
 
-  <div id="pairs" class="pairs"></div>
-</main>
+    <div class="sidebar-spacer"></div>
+    <div class="sidebar-footer">
+      <span id="footer-mem">— MB</span>
+      <span id="footer-uptime">—</span>
+      <span id="footer-scan">—</span>
+    </div>
+  </aside>
+
+  <main>
+    <div class="page-head">
+      <div>
+        <div class="eyebrow">POLYBOT · DASHBOARD</div>
+        <h1 class="page-title" data-i18n="page.title">הזדמנויות ארביטראז'</h1>
+      </div>
+      <div class="page-updated" id="page-updated">—</div>
+    </div>
+
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="kpi-label" data-i18n="kpi.balance">יתרת USDC</div>
+        <div id="kpi-balance" class="kpi-value num">—</div>
+        <div class="kpi-sub" data-i18n="kpi.balance.sub">זמין למסחר</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label" data-i18n="kpi.active">זוגות פעילים</div>
+        <div id="kpi-confirmed" class="kpi-value g num">—</div>
+        <div class="kpi-sub" data-i18n="kpi.active.sub">נסחרים אוטומטית</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label" data-i18n="kpi.pending">ממתינים לאישור</div>
+        <div id="kpi-pending" class="kpi-value a num">—</div>
+        <div class="kpi-sub" data-i18n="kpi.pending.sub">ב-Telegram</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label" data-i18n="kpi.discovered">זוגות במעקב</div>
+        <div id="kpi-discovered" class="kpi-value num">—</div>
+        <div class="kpi-sub" data-i18n="kpi.discovered.sub">AI + רגקס</div>
+      </div>
+    </div>
+
+    <div class="section-head">
+      <div class="section-title">
+        <span data-i18n="section.pairs">זוגות מנוטרים</span>
+        <span class="live-dot"></span>
+      </div>
+      <div class="section-count" id="section-count">—</div>
+    </div>
+
+    <div id="pairs" class="pairs"></div>
+  </main>
+
+</div>
 
 <script>
 /* ============ i18n ============ */
 const I18N = {
   he: {
+    "sidebar.nav": "ניווט",
+    "sidebar.strategies": "אסטרטגיות פעילות",
     "nav.home": "ראשי",
     "nav.logs": "לוגים",
     "nav.env": "הגדרות",
     "page.title": "הזדמנויות ארביטראז'",
-    "stat.balance": "יתרת USDC",
-    "stat.confirmed": "זוגות פעילים",
-    "stat.confirmed.sub": "נסחרים אוטומטית",
-    "stat.pending": "ממתינים לאישור",
-    "stat.pending.sub": "ב-Telegram",
-    "stat.discovered": "זוגות במעקב",
+    "kpi.balance": "יתרת USDC",
+    "kpi.balance.sub": "זמין למסחר",
+    "kpi.active": "זוגות פעילים",
+    "kpi.active.sub": "נסחרים אוטומטית",
+    "kpi.pending": "ממתינים לאישור",
+    "kpi.pending.sub": "ב-Telegram",
+    "kpi.discovered": "זוגות במעקב",
+    "kpi.discovered.sub": "AI + רגקס",
     "section.pairs": "זוגות מנוטרים",
     "leg.early": "מוקדם",
     "leg.late": "מאוחר",
     "card.totalCost": "עלות כניסה",
     "card.lockedProfit": "רווח נעול",
     "card.waiting": "ממתין לתמחור מהספר…",
-    "card.endsPrefix": "ends",
+    "card.endsPrefix": "סיום",
     "card.daysLeft": "ימים",
+    "card.openOnPolymarket": "פתח בפולימרקט",
     "source.regex": "זיהוי אוטומטי",
     "source.llm": "זוהה ע״י AI",
     "source.user": "אושר על ידך",
-    "card.openOnPolymarket": "פתח בפולימרקט",
     "empty.title": "הבוט סורק שווקים…",
     "empty.body": "זוגות יופיעו כאן ברגע שיזוהו.",
     "status.running": "פועל",
     "status.failed": "כשל",
     "status.unknown": "לא ידוע",
-    "subtitle.updated": "עדכון אחרון",
+    "subtitle.updated": "עודכן",
+    "subtitle.seconds": "לפני {n} שניות",
+    "footer.scan": "סריקה · {n}s",
   },
   en: {
+    "sidebar.nav": "Navigation",
+    "sidebar.strategies": "Active strategies",
     "nav.home": "Home",
     "nav.logs": "Logs",
     "nav.env": "Settings",
     "page.title": "Arbitrage opportunities",
-    "stat.balance": "USDC balance",
-    "stat.confirmed": "Active pairs",
-    "stat.confirmed.sub": "Trading automatically",
-    "stat.pending": "Pending approval",
-    "stat.pending.sub": "On Telegram",
-    "stat.discovered": "Tracked pairs",
+    "kpi.balance": "USDC balance",
+    "kpi.balance.sub": "Available to trade",
+    "kpi.active": "Active pairs",
+    "kpi.active.sub": "Trading automatically",
+    "kpi.pending": "Pending approval",
+    "kpi.pending.sub": "On Telegram",
+    "kpi.discovered": "Tracked pairs",
+    "kpi.discovered.sub": "AI + regex",
     "section.pairs": "Monitored pairs",
-    "leg.early": "EARLY",
-    "leg.late": "LATE",
+    "leg.early": "Early",
+    "leg.late": "Late",
     "card.totalCost": "Entry cost",
     "card.lockedProfit": "Locked profit",
     "card.waiting": "Waiting for orderbook pricing…",
-    "card.endsPrefix": "ends",
+    "card.endsPrefix": "Ends",
     "card.daysLeft": "days left",
+    "card.openOnPolymarket": "Open on Polymarket",
     "source.regex": "Auto-matched",
     "source.llm": "AI-matched",
     "source.user": "User approved",
-    "card.openOnPolymarket": "Open on Polymarket",
     "empty.title": "Bot is scanning markets…",
     "empty.body": "Pairs will appear here once detected.",
     "status.running": "Running",
     "status.failed": "Failed",
     "status.unknown": "Unknown",
-    "subtitle.updated": "Last update",
+    "subtitle.updated": "Updated",
+    "subtitle.seconds": "{n}s ago",
+    "footer.scan": "Scan · {n}s",
   },
 };
 
 let LANG = localStorage.getItem("dashLang") || (navigator.language.startsWith("he") ? "he" : "he");
-function t(key) { return (I18N[LANG] && I18N[LANG][key]) || key; }
+function t(key, vars) {
+  let s = (I18N[LANG] && I18N[LANG][key]) || key;
+  if (vars) for (const k in vars) s = s.replace(`{${k}}`, vars[k]);
+  return s;
+}
 function applyLanguage() {
   document.documentElement.lang = LANG;
   document.documentElement.dir = LANG === "he" ? "rtl" : "ltr";
@@ -415,7 +539,7 @@ function applyLanguage() {
   document.querySelectorAll(".lang-toggle button").forEach(btn => {
     btn.classList.toggle("active", btn.dataset.lang === LANG);
   });
-  if (typeof lastData !== "undefined" && lastData) render(lastData);
+  if (lastData) render(lastData);
 }
 document.querySelectorAll(".lang-toggle button").forEach(btn => {
   btn.addEventListener("click", () => {
@@ -426,16 +550,21 @@ document.querySelectorAll(".lang-toggle button").forEach(btn => {
 });
 
 /* ============ Helpers ============ */
+const escapeHtml = s => (s || "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const fmtTs = u => {
   if (!u) return "—";
   return new Date(u * 1000).toLocaleTimeString(LANG === "he" ? "he-IL" : "en-US", { hour12: false });
 };
 const fmtUptime = s => {
-  if (!s) return "";
-  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m`;
+  if (!s && s !== 0) return "—";
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
 };
-const escapeHtml = s => (s || "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const fmtDate = iso => {
   if (!iso) return "—";
   try {
@@ -445,22 +574,16 @@ const fmtDate = iso => {
 };
 const clampPct = x => Math.max(0, Math.min(100, x || 0));
 
-/* Build a Polymarket event URL from the slugs written into the price
-   snapshot by strategy.py. Prefer the event slug (the canonical landing
-   page) and fall back to the market slug if the event one is missing.
-   Returns null when neither is available — the icon is then skipped. */
+/* Polymarket canonical URL from the event slug (preferred) or market slug. */
 function pmUrl(eventSlug, marketSlug) {
   const s = eventSlug || marketSlug;
   if (!s || typeof s !== "string") return null;
   return `https://polymarket.com/event/${encodeURIComponent(s)}`;
 }
-
 function legLink(eventSlug, marketSlug) {
   const url = pmUrl(eventSlug, marketSlug);
   if (!url) return "";
   const label = escapeHtml(t("card.openOnPolymarket"));
-  // SVG: an "external-link" glyph (arrow escaping a box). Inline so it
-  // inherits currentColor for hover theming without extra assets.
   return `<a href="${url}" target="_blank" rel="noopener noreferrer" class="ext-link" dir="ltr" title="${label}" aria-label="${label}">`
        + `<svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">`
        + `<path d="M5.5 2.5h6v6"/><path d="M11.5 2.5L6 8"/>`
@@ -471,29 +594,28 @@ function legLink(eventSlug, marketSlug) {
 function sourcePill(p) {
   const method = p.discovery_method || "llm";
   if (method === "regex_exact" || method === "regex_auto") {
-    return `<span class="pill pill-primary">🎯 ${t("source.regex")}</span>`;
+    return `<span class="pill pill-b">🎯 ${t("source.regex")}</span>`;
   }
   if (p.tier === "confirmed" && !String(method).includes("regex")) {
-    return `<span class="pill pill-success">✅ ${t("source.user")}</span>`;
+    return `<span class="pill pill-g">✓ ${t("source.user")}</span>`;
   }
-  return `<span class="pill pill-gray">🤖 ${t("source.llm")}</span>`;
+  return `<span class="pill pill-p">🤖 ${t("source.llm")}</span>`;
 }
-
 function daysPill(days) {
   if (days == null || !isFinite(days)) return "";
   const d = Math.max(0, Math.floor(days));
   let cls = "pill-gray";
-  if (d <= 7) cls = "pill-danger";
-  else if (d <= 30) cls = "pill-warning";
+  if (d <= 7) cls = "pill-r";
+  else if (d <= 30) cls = "pill-a";
   return `<span class="pill ${cls}">📅 ${d} ${t("card.daysLeft")}</span>`;
 }
-
-function liveDot(updatedAt) {
+function liveClock(updatedAt) {
   const nowSec = Date.now() / 1000;
   const fresh = updatedAt && (nowSec - updatedAt) < 30;
-  return `<span class="live-dot ${fresh ? "is-live" : ""}"><span class="dot"></span>${fmtTs(updatedAt)}</span>`;
+  return `<span class="pair-clock ${fresh ? "is-live" : ""}"><span class="dot"></span>${fmtTs(updatedAt)}</span>`;
 }
 
+/* ============ Pair card ============ */
 function renderPairCard(p) {
   const live = p.live || {};
   const totalCost = live.total_cost;
@@ -502,17 +624,17 @@ function renderPairCard(p) {
 
   let profitBlock = `<div class="placeholder">${t("card.waiting")}</div>`;
   if (hasPricing) {
-    const profitCls = profitPct >= 0 ? "success" : "danger";
-    const barCls = profitPct >= 2 ? "success" : profitPct >= 0 ? "" : "danger";
+    const profitCls = profitPct >= 0 ? "g" : "r";
+    const barCls = profitPct >= 2 ? "g" : profitPct >= 0 ? "" : "r";
     profitBlock = `
       <div class="stats-row">
         <div class="stat-block">
           <div class="label">${t("card.totalCost")}</div>
-          <div class="value num">$${totalCost.toFixed(3)}</div>
+          <div class="value">$${totalCost.toFixed(3)}</div>
         </div>
         <div class="stat-block">
           <div class="label">${t("card.lockedProfit")}</div>
-          <div class="value num ${profitCls}">${profitPct >= 0 ? "+" : ""}${profitPct.toFixed(1)}%</div>
+          <div class="value ${profitCls}">${profitPct >= 0 ? "+" : ""}${profitPct.toFixed(1)}%</div>
         </div>
       </div>
       <div class="progress">
@@ -521,21 +643,22 @@ function renderPairCard(p) {
   }
 
   return `
-    <div class="card" data-pair="${escapeHtml(p.pair_key || "")}">
-      <div class="card-top">
-        <div class="card-top-left">
+    <div class="pair" data-pair="${escapeHtml(p.pair_key || "")}">
+      <div class="pair-head">
+        <div class="pair-pills">
           ${sourcePill(p)}
           ${live.days_until_close != null ? daysPill(live.days_until_close) : ""}
-          ${p.tier === "confirmed" ? '<span class="pill pill-success">●&nbsp;active</span>' : ""}
+          ${p.tier === "confirmed" ? '<span class="pill pill-g">● active</span>' : ""}
+          ${p.tier === "pending" ? '<span class="pill pill-a">● pending</span>' : ""}
         </div>
-        ${liveDot(live.updated_at)}
+        ${liveClock(live.updated_at)}
       </div>
       <div>
         <div class="leg">
           <span class="leg-label">${t("leg.early")}</span>
           <span class="leg-q">${escapeHtml(p.early_question || live.early_question || "—")}${legLink(live.early_event_slug, live.early_slug)}</span>
         </div>
-        <div class="leg" style="margin-top:6px">
+        <div class="leg">
           <span class="leg-label">${t("leg.late")}</span>
           <span class="leg-q">${escapeHtml(live.late_question || "—")}${legLink(live.late_event_slug, live.late_slug)}</span>
         </div>
@@ -562,7 +685,7 @@ async function refresh() {
     render(lastData);
   } catch (err) {
     console.error(err);
-    document.getElementById("subtitle").textContent = "⚠ " + err.message;
+    document.getElementById("page-updated").textContent = "⚠ " + err.message;
   }
 }
 
@@ -570,32 +693,47 @@ function render({ status, pairs }) {
   // Service pill
   const svc = status.service || {};
   const pill = document.getElementById("service-pill");
-  pill.className = "pill pill-dot " + (
-    svc.active === "active" ? "pill-success" :
-    svc.active === "failed" ? "pill-danger" : "pill-gray"
+  pill.className = "service-pill " + (
+    svc.active === "active" ? "is-active" :
+    svc.active === "failed" ? "is-failed" : ""
   );
-  const label =
+  document.getElementById("service-text").textContent =
     svc.active === "active" ? t("status.running") :
     svc.active === "failed" ? t("status.failed") : t("status.unknown");
-  const uptime = svc.uptime_sec ? ` · ${fmtUptime(svc.uptime_sec)}` : "";
-  pill.textContent = label + uptime;
+  document.getElementById("service-uptime").textContent =
+    svc.uptime_sec != null ? `· ${fmtUptime(svc.uptime_sec)}` : "";
 
-  // Subtitle
-  document.getElementById("subtitle").textContent =
-    `${t("subtitle.updated")}: ${fmtTs(status.server_time)}`;
+  // Page updated
+  document.getElementById("page-updated").textContent =
+    `${t("subtitle.updated")} · ${fmtTs(status.server_time)}`;
 
-  // Stats
+  // KPI row
   const bal = status.latest_balance_usd;
-  document.getElementById("balance").textContent = bal == null ? "—" : `$${bal.toFixed(2)}`;
-  document.getElementById("count-confirmed").textContent = pairs.counts.confirmed;
-  document.getElementById("count-pending").textContent = pairs.counts.pending;
-  document.getElementById("count-discovered").textContent = pairs.counts.discovered;
-  document.getElementById("pairs-count").textContent =
-    pairs.counts.discovered + (LANG === "he" ? " זוגות" : " pairs");
+  document.getElementById("kpi-balance").textContent =
+    bal == null ? "—" : `$${bal.toFixed(2)}`;
+  document.getElementById("kpi-confirmed").textContent = pairs.counts.confirmed;
+  document.getElementById("kpi-pending").textContent = pairs.counts.pending;
+  document.getElementById("kpi-discovered").textContent = pairs.counts.discovered;
 
-  // Pair cards (sort: confirmed first, then by profit%, then by discovery order)
+  // Sidebar badge + strategy count
+  document.getElementById("nav-pair-count").textContent = pairs.counts.discovered;
+  document.getElementById("strat-count").textContent = `${pairs.counts.confirmed}/${pairs.counts.discovered}`;
+
+  // Sidebar footer
+  document.getElementById("footer-mem").textContent =
+    svc.memory_mb != null ? `${Math.round(svc.memory_mb)} MB` : "— MB";
+  document.getElementById("footer-uptime").textContent =
+    svc.uptime_sec != null ? fmtUptime(svc.uptime_sec) : "—";
+  const hb = status.heartbeat || {};
+  document.getElementById("footer-scan").textContent =
+    hb.scan_interval_s ? `${hb.scan_interval_s}s` : "10s";
+
+  // Section count
+  document.getElementById("section-count").textContent =
+    `${pairs.counts.discovered} ${LANG === "he" ? "זוגות" : "pairs"}`;
+
+  // Pair cards (sort: confirmed → pending → probe → rejected, then by profit% desc)
   const list = Array.isArray(pairs.discovered) ? pairs.discovered.slice() : [];
-  // Enrich with tier from confirmed/pending/rejected lookups
   list.forEach(p => {
     const key = p.pair_key;
     if (pairs.confirmed && pairs.confirmed[key]) p.tier = "confirmed";
@@ -604,9 +742,9 @@ function render({ status, pairs }) {
     else p.tier = "probe";
   });
   list.sort((a, b) => {
-    const tierOrder = { confirmed: 0, pending: 1, probe: 2, rejected: 3 };
-    const ta = tierOrder[a.tier] ?? 4;
-    const tb = tierOrder[b.tier] ?? 4;
+    const order = { confirmed: 0, pending: 1, probe: 2, rejected: 3 };
+    const ta = order[a.tier] ?? 4;
+    const tb = order[b.tier] ?? 4;
     if (ta !== tb) return ta - tb;
     const pa = (a.live && a.live.entry_profit_pct) ?? -Infinity;
     const pb = (b.live && b.live.entry_profit_pct) ?? -Infinity;
@@ -616,7 +754,7 @@ function render({ status, pairs }) {
   const host = document.getElementById("pairs");
   if (list.length === 0) {
     host.innerHTML = `
-      <div class="empty" style="grid-column: 1 / -1">
+      <div class="empty">
         <div class="empty-icon">🔭</div>
         <h3>${t("empty.title")}</h3>
         <p>${t("empty.body")}</p>
