@@ -788,6 +788,13 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # obvious opportunities even if GEMINI_API_KEY is unset/invalid.
         self._regex_discover_obvious_pairs(all_markets)
 
+        # Idempotent backfill: any LLM-discovered pair that predates the
+        # pre-trade-verification gate (so it's sitting at tier "probe" but
+        # never got a Telegram alert) is migrated into pending_pairs now.
+        # No-op for regex pairs (already confirmed) and for already-
+        # decided pairs (in confirmed / rejected / pending).
+        self._migrate_probe_llm_pairs_to_pending()
+
         # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
             start = self.market_offset
@@ -986,6 +993,42 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # Dashboard heartbeat — writes data/status_snapshot.json.
         await self._write_heartbeat_snapshot()
         return opportunities
+
+    def _migrate_probe_llm_pairs_to_pending(self):
+        """Ensure every LLM-discovered pair that isn't already decided sits
+        in pending_pairs awaiting ✅/❌. Idempotent — called each scan so
+        pairs from before the pre-trade-verification gate was introduced
+        still end up getting their alert."""
+        import time as _time
+        now = _time.time()
+        changed = False
+        for p in self.discovered_pairs:
+            method = p.get("discovery_method", "llm")
+            if "regex" in method:
+                continue  # regex pairs are auto-trusted — see _regex_discover_obvious_pairs
+            early_id = p.get("early_id")
+            late_id = p.get("late_id")
+            if not early_id or not late_id:
+                continue
+            key = self._pair_key(early_id, late_id)
+            if (key in self.confirmed_pairs
+                or key in self.rejected_pairs
+                or key in self.pending_pairs):
+                continue
+            self.pending_pairs[key] = {
+                "opened_at": now,
+                "early_id": early_id,
+                "late_id": late_id,
+                "early_question": p.get("early_question", ""),
+                "llm_reason": p.get("description", ""),
+                "llm_confidence": p.get("resolution_match_confidence"),
+                "discovery_method": method,
+                "source": "pre_trade_verification",
+                "alerted": False,
+            }
+            changed = True
+        if changed:
+            self._save_json_state(self.PENDING_FILE, self.pending_pairs)
 
     async def _write_heartbeat_snapshot(self):
         """Writes data/status_snapshot.json with balance + stats + strategy
