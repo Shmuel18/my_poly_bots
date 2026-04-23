@@ -106,20 +106,12 @@ class PolymarketConnection:
         private_key = self._get_or_env('PRIVATE_KEY', 'POLYMARKET_PRIVATE_KEY')
         funder_address = self._get_or_env('FUNDER_ADDRESS', 'POLYMARKET_FUNDER_ADDRESS')
         
-        missing = []
-        for name, val in [('POLYMARKET_API_KEY', api_key),
-                          ('POLYMARKET_API_SECRET', api_secret),
-                          ('POLYMARKET_API_PASSPHRASE', api_passphrase),
-                          ('POLYMARKET_PRIVATE_KEY', private_key)]:
-            if not val:
-                missing.append(name)
-        
-        # FUNDER_ADDRESS נדרש רק במצב Proxy
-        # נבדוק ונדווח אם חסר כאשר נדרש
-        if missing:
+        # POLYMARKET_PRIVATE_KEY is strictly required — we derive everything else
+        # from it if the L2 creds (API_SECRET / API_PASSPHRASE) aren't provided.
+        if not private_key:
             raise EnvironmentError(
-                f"Missing required credentials: {', '.join(missing)}\n"
-                f"Provide via constructor or config/.env"
+                "Missing required credential: POLYMARKET_PRIVATE_KEY\n"
+                "Provide via constructor or config/.env"
             )
     
     def _init_client(self):
