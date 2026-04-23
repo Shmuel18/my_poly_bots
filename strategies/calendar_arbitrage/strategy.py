@@ -1474,7 +1474,36 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     
                     # Log stats
                     self.logger.info(f"\n📈 Stats: {self.stats['trades_entered']} entered, {self.stats['trades_exited']} exited")
-                    
+
+                    # Heartbeat snapshot for the dashboard (balance + stats).
+                    # Dashboard reads data/status_snapshot.json for a live
+                    # balance readout — the bot itself otherwise only logs
+                    # balance just before a trade.
+                    try:
+                        import time as _time
+                        bal = await self.executor.get_balance()
+                        snapshot = {
+                            "balance_usd": float(bal) if bal is not None else None,
+                            "updated_at": _time.time(),
+                            "loop": loop_count,
+                            "stats": {
+                                "trades_entered": int(self.stats.get("trades_entered", 0)),
+                                "trades_exited": int(self.stats.get("trades_exited", 0)),
+                            },
+                            "open_positions": len(self.open_positions),
+                            "pair_counts": {
+                                "discovered": len(self.discovered_pairs),
+                                "confirmed": len(self.confirmed_pairs),
+                                "pending": len(self.pending_pairs),
+                                "rejected": len(self.rejected_pairs),
+                            },
+                        }
+                        self._save_json_state(
+                            os.path.join("data", "status_snapshot.json"), snapshot
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Heartbeat snapshot failed: {e}")
+
                     # Wait for next scan
                     await asyncio.sleep(self.scan_interval)
                     

@@ -195,11 +195,20 @@ def env_page():
 @app.get("/api/status")
 def api_status():
     log = _latest_bot_log()
+    # Prefer the bot's own heartbeat snapshot (written every scan) over
+    # scraping a balance line out of the log file.
+    heartbeat = _read_json(DATA_DIR / "status_snapshot.json", {})
+    if not isinstance(heartbeat, dict):
+        heartbeat = {}
+    balance = heartbeat.get("balance_usd")
+    if balance is None:
+        balance = _parse_latest_balance(log)
     return JSONResponse({
         "server_time": int(time.time()),
         "service": _systemctl_status(SERVICE_NAME),
         "env": _env_flags(),
-        "latest_balance_usd": _parse_latest_balance(log),
+        "latest_balance_usd": balance,
+        "heartbeat": heartbeat or None,
         "log_file": str(log) if log else None,
     })
 
