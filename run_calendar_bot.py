@@ -121,7 +121,22 @@ Examples:
         action='store_true',
         help='Disable Telegram notifier entirely (runs fully automated with probe sizing only)'
     )
-    
+
+    parser.add_argument(
+        '--include-duplicates',
+        action='store_true',
+        default=True,
+        help='Also run cross-market duplicate-arbitrage in parallel (default: enabled)'
+    )
+    parser.add_argument('--no-duplicates', dest='include_duplicates', action='store_false',
+                        help='Disable duplicate-arbitrage strategy')
+    parser.add_argument('--duplicate-scan-interval', type=int, default=45,
+                        help='Duplicate-arb scan interval in seconds (default: 45)')
+    parser.add_argument('--duplicate-similarity-threshold', type=float, default=0.90,
+                        help='Cosine similarity threshold for duplicate candidates (default: 0.90)')
+    parser.add_argument('--duplicate-min-confidence', type=float, default=0.95,
+                        help='LLM confidence threshold to accept a duplicate pair (default: 0.95)')
+
     # NLP/LLM options
     parser.add_argument(
         '--use-embeddings',
@@ -214,7 +229,34 @@ Examples:
         if not strategies:
             print("❌ Failed to initialize strategy")
             sys.exit(1)
-        
+
+        # Optionally append duplicate-arb strategies sharing each account's connection.
+        if args.include_duplicates:
+            from strategies.duplicate_arbitrage import DuplicateArbitrageStrategy
+            dup_strategies = []
+            for base_strat in list(strategies):
+                try:
+                    dup = DuplicateArbitrageStrategy(
+                        connection=base_strat.connection,
+                        scan_interval=args.duplicate_scan_interval,
+                        log_level=args.log_level,
+                        min_profit_threshold=args.profit,
+                        early_exit_threshold=args.early_exit_threshold,
+                        similarity_threshold=args.duplicate_similarity_threshold,
+                        min_confidence=args.duplicate_min_confidence,
+                        probe_usd=args.probe_usd,
+                        confirmed_usd=args.confirmed_usd,
+                        escalation_minutes=args.escalation_minutes,
+                        use_telegram=not args.no_telegram,
+                        llm_model=args.llm_model,
+                        dry_run=not args.live,
+                    )
+                    dup_strategies.append(dup)
+                    print(f"🔁 Duplicate-Arb added (scan every {args.duplicate_scan_interval}s)")
+                except Exception as e:
+                    print(f"⚠️ Duplicate-Arb init failed: {e}")
+            strategies.extend(dup_strategies)
+
         # Run async
         asyncio.run(run_async(strategies))
         

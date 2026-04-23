@@ -222,42 +222,80 @@ def _pair_key(early_id: str, late_id: str) -> str:
 
 @app.get("/api/pairs")
 def api_pairs():
-    discovered = _read_json(DATA_DIR / "discovered_pairs.json", [])
-    confirmed = _read_json(DATA_DIR / "confirmed_pairs.json", {})
-    pending = _read_json(DATA_DIR / "pending_confirmation.json", {})
-    rejected = _read_json(DATA_DIR / "rejected_pairs.json", {})
-    price_snapshot = _read_json(DATA_DIR / "price_snapshot.json", {})
-    # Ensure lists/dicts
-    if not isinstance(discovered, list):
-        discovered = []
-    if not isinstance(confirmed, dict):
-        confirmed = {}
-    if not isinstance(pending, dict):
-        pending = {}
-    if not isinstance(rejected, dict):
-        rejected = {}
-    if not isinstance(price_snapshot, dict):
-        price_snapshot = {}
+    # ---------- Calendar arbitrage ----------
+    cal_discovered = _read_json(DATA_DIR / "discovered_pairs.json", [])
+    cal_confirmed = _read_json(DATA_DIR / "confirmed_pairs.json", {})
+    cal_pending = _read_json(DATA_DIR / "pending_confirmation.json", {})
+    cal_rejected = _read_json(DATA_DIR / "rejected_pairs.json", {})
+    cal_snap = _read_json(DATA_DIR / "price_snapshot.json", {})
 
-    # Enrich each discovered pair with its live-price entry (if the bot has
-    # scanned it recently). The frontend uses this to render cards with
-    # current ask/bid/total_cost/profit without a second round-trip.
-    for p in discovered:
+    if not isinstance(cal_discovered, list): cal_discovered = []
+    if not isinstance(cal_confirmed, dict): cal_confirmed = {}
+    if not isinstance(cal_pending, dict): cal_pending = {}
+    if not isinstance(cal_rejected, dict): cal_rejected = {}
+    if not isinstance(cal_snap, dict): cal_snap = {}
+
+    for p in cal_discovered:
         key = _pair_key(p.get("early_id", ""), p.get("late_id", ""))
         p["pair_key"] = key
-        if key in price_snapshot:
-            p["live"] = price_snapshot[key]
+        p["strategy"] = "calendar"
+        p["strategy_label"] = "Calendar"
+        if key in cal_snap:
+            p["live"] = cal_snap[key]
+
+    # ---------- Duplicate arbitrage ----------
+    dup_discovered = _read_json(DATA_DIR / "duplicate_discovered.json", [])
+    dup_confirmed = _read_json(DATA_DIR / "duplicate_confirmed.json", {})
+    dup_pending = _read_json(DATA_DIR / "duplicate_pending.json", {})
+    dup_rejected = _read_json(DATA_DIR / "duplicate_rejected.json", {})
+    dup_snap = _read_json(DATA_DIR / "duplicate_price_snapshot.json", {})
+
+    if not isinstance(dup_discovered, list): dup_discovered = []
+    if not isinstance(dup_confirmed, dict): dup_confirmed = {}
+    if not isinstance(dup_pending, dict): dup_pending = {}
+    if not isinstance(dup_rejected, dict): dup_rejected = {}
+    if not isinstance(dup_snap, dict): dup_snap = {}
+
+    for p in dup_discovered:
+        key = p.get("pair_key") or ""
+        p["strategy"] = "duplicate"
+        p["strategy_label"] = "Duplicate"
+        if key in dup_snap:
+            p["live"] = dup_snap[key]
+
+    # ---------- Merge + tag ----------
+    def _tag(d: Dict[str, Any], strategy: str) -> Dict[str, Any]:
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, dict):
+                v = {**v, "strategy": strategy}
+            out[k] = v
+        return out
 
     return JSONResponse({
-        "discovered": discovered,
-        "confirmed": confirmed,
-        "pending": pending,
-        "rejected": rejected,
+        "discovered": cal_discovered + dup_discovered,
+        "confirmed": {**_tag(cal_confirmed, "calendar"), **_tag(dup_confirmed, "duplicate")},
+        "pending":   {**_tag(cal_pending, "calendar"),   **_tag(dup_pending, "duplicate")},
+        "rejected":  {**_tag(cal_rejected, "calendar"),  **_tag(dup_rejected, "duplicate")},
         "counts": {
-            "discovered": len(discovered),
-            "confirmed": len(confirmed),
-            "pending": len(pending),
-            "rejected": len(rejected),
+            "discovered": len(cal_discovered) + len(dup_discovered),
+            "confirmed": len(cal_confirmed) + len(dup_confirmed),
+            "pending": len(cal_pending) + len(dup_pending),
+            "rejected": len(cal_rejected) + len(dup_rejected),
+        },
+        "by_strategy": {
+            "calendar": {
+                "discovered": len(cal_discovered),
+                "confirmed": len(cal_confirmed),
+                "pending": len(cal_pending),
+                "rejected": len(cal_rejected),
+            },
+            "duplicate": {
+                "discovered": len(dup_discovered),
+                "confirmed": len(dup_confirmed),
+                "pending": len(dup_pending),
+                "rejected": len(dup_rejected),
+            },
         },
     })
 

@@ -1078,13 +1078,45 @@ class CalendarArbitrageStrategy(BaseStrategy):
     async def _write_heartbeat_snapshot(self):
         """Writes data/status_snapshot.json with balance + stats + strategy
         config so the dashboard can render a fresh overview every 10s
-        without re-reading the bot log. Failures are swallowed at WARNING
-        level — a broken heartbeat must never take the bot down."""
+        without re-reading the bot log.
+
+        Also registers this strategy in the shared ``strategies`` section
+        so duplicate_arb (or any future strategy) can co-exist. Failures
+        are swallowed at WARNING level — a broken heartbeat must never
+        take the bot down."""
         try:
             import time as _time
             bal = await self.executor.get_balance()
-            snapshot = {
-                "balance_usd": float(bal) if bal is not None else None,
+            cal_stats = {
+                "label": "Calendar",
+                "discovered": len(self.discovered_pairs),
+                "confirmed": len(self.confirmed_pairs),
+                "pending": len(self.pending_pairs),
+                "rejected": len(self.rejected_pairs),
+                "trades_entered": int(self.stats.get("trades_entered", 0)),
+                "trades_exited": int(self.stats.get("trades_exited", 0)),
+                "open_positions": len(getattr(self, "open_positions", {}) or {}),
+                "loop": int(self.stats.get("scans", 0)),
+            }
+            # Register in shared strategies section (singleton heartbeat)
+            try:
+                from core.heartbeat import MultiStrategyHeartbeat
+                MultiStrategyHeartbeat.instance().write(
+                    strategy_key="calendar_arb",
+                    balance_usd=float(bal) if bal is not None else None,
+                    stats=cal_stats,
+                )
+            except Exception:
+                pass
+
+            # Preserve the original flat format so the existing dashboard views
+            # (which read heartbeat.stats, heartbeat.pair_counts, heartbeat.strategy)
+            # keep working.
+            snapshot = self._load_json_state(os.path.join("data", "status_snapshot.json")) or {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            snapshot.update({
+                "balance_usd": float(bal) if bal is not None else snapshot.get("balance_usd"),
                 "updated_at": _time.time(),
                 "loop": int(self.stats.get("scans", 0)),
                 "scan_interval_s": int(self.scan_interval),
@@ -1109,7 +1141,8 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     "confirmed_usd": float(self.confirmed_usd),
                     "llm_model": str(self.llm_model) if self.use_llm else None,
                 },
-            }
+            })
+            # Preserve the "strategies" section the shared heartbeat just wrote
             self._save_json_state(
                 os.path.join("data", "status_snapshot.json"), snapshot
             )
@@ -1617,7 +1650,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "total_cost": total_cost if total_cost is not None else 0,
                 "annualized_roi": roi if roi is not None else 0,
             }
-            ok = await self.telegram.send_pair_alert(pair_key, alert_info)
+            ok = await self.telegram.send_pair_alert(pair_key, alert_info, strategy_label="Calendar")
             if ok:
                 state["alerted"] = True
                 state["alerted_at"] = now

@@ -49,29 +49,40 @@ class TelegramNotifier:
         else:
             logger.info(f"📨 Telegram notifier enabled (chat_id={self.chat_id})")
 
-    async def send_pair_alert(self, pair_key: str, pair_info: Dict[str, Any]) -> bool:
+    async def send_pair_alert(
+        self,
+        pair_key: str,
+        pair_info: Dict[str, Any],
+        strategy_label: Optional[str] = None,
+    ) -> bool:
         """Send an arbitrage-candidate alert with Approve / Reject buttons.
 
         pair_info expects keys: early_question, late_question, early_desc,
         late_desc, early_end, late_end, ask_no_early, ask_yes_late, total_cost,
         annualized_roi, early_url (optional), late_url (optional).
+
+        strategy_label — "Calendar" or "Duplicate". Defaults to "Calendar".
         """
         if not self.enabled:
             return False
 
+        label = strategy_label or pair_info.get("strategy_label") or "Calendar"
+        emoji = "🔁" if str(label).lower().startswith("dup") else "📅"
+
         roi = pair_info.get("annualized_roi", 0) * 100
         profit = (1.0 - pair_info.get("total_cost", 1.0)) * 100
         text = (
-            "🔔 *Calendar Arb candidate — please verify*\n\n"
-            f"*Early:* {pair_info.get('early_question', 'N/A')}\n"
-            f"  ends: `{pair_info.get('early_end', '?')}` · ask\\_NO: `${pair_info.get('ask_no_early', 0):.3f}`\n\n"
-            f"*Late:* {pair_info.get('late_question', 'N/A')}\n"
-            f"  ends: `{pair_info.get('late_end', '?')}` · ask\\_YES: `${pair_info.get('ask_yes_late', 0):.3f}`\n\n"
+            f"🔔 *[{label}] pair candidate — please verify*\n\n"
+            f"{emoji} *First market:* {pair_info.get('early_question', 'N/A')}\n"
+            f"  ends: `{pair_info.get('early_end', '?')}` · ask\\_1: `${pair_info.get('ask_no_early', 0):.3f}`\n\n"
+            f"{emoji} *Second market:* {pair_info.get('late_question', 'N/A')}\n"
+            f"  ends: `{pair_info.get('late_end', '?')}` · ask\\_2: `${pair_info.get('ask_yes_late', 0):.3f}`\n\n"
             f"*Total cost:* `${pair_info.get('total_cost', 0):.4f}` · "
-            f"*Locked profit:* `{profit:.2f}%` · *ROI (annualized):* `{roi:.1f}%`\n\n"
-            "_Early desc:_\n"
+            f"*Locked profit:* `{profit:.2f}%`"
+            + (f" · *ROI (annualized):* `{roi:.1f}%`\n\n" if roi else "\n\n")
+            + "_Market 1 desc:_\n"
             f"{(pair_info.get('early_desc') or '')[:350]}\n\n"
-            "_Late desc:_\n"
+            "_Market 2 desc:_\n"
             f"{(pair_info.get('late_desc') or '')[:350]}\n\n"
             "Are the resolution criteria IDENTICAL? ✅ Approve → bot trades at full size. ❌ Reject → blacklist."
         )

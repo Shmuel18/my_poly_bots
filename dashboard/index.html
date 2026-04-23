@@ -269,6 +269,25 @@
     font-family: 'JetBrains Mono', monospace; font-size: 11px;
     margin-inline-start: 6px; opacity: 0.7;
   }
+  .chip.strategy-chip {
+    font-weight: 600;
+    border-width: 1.5px;
+  }
+
+  /* Strategy badges on pair cards */
+  .strategy-badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 10px; border-radius: 20px;
+    font-size: 11px; font-weight: 700; letter-spacing: 0.01em;
+    cursor: help;
+    line-height: 1.4;
+  }
+  .strategy-badge.calendar {
+    background: #e0f2fe; color: #075985;
+  }
+  .strategy-badge.duplicate {
+    background: #fce7f3; color: #9d174d;
+  }
 
   /* Pair cards */
   .pairs { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 12px; }
@@ -683,6 +702,15 @@ const I18N = {
     "panel.scanner": "סורק הזדמנויות",
     "leg.early": "מוקדם",
     "leg.late": "מאוחר",
+    "leg.a": "שוק A",
+    "leg.b": "שוק B",
+    "filter.all": "הכל",
+    "filter.calendar": "Calendar",
+    "filter.duplicate": "Duplicate",
+    "strategy.calendar.short": "Calendar",
+    "strategy.duplicate.short": "Duplicate",
+    "strategy.calendar.tip": "Calendar Arbitrage — שני שווקים של אותו אירוע עם תאריכי יעד שונים. קונים NO על הקצר ו-YES על הארוך; אם הארוך זול מהקצר, הפער נועל רווח מובטח עד resolution.",
+    "strategy.duplicate.tip": "Duplicate Arbitrage — שני שווקים שונים שנפתרים על קריטריון זהה (אותו אירוע, אותו תאריך). אם ask_YES(A) + ask_NO(B) < $1, קניית שני הצדדים מבטיחה תשלום של $1 ומכסה את הפער.",
     "card.totalCost": "עלות כניסה",
     "card.lockedProfit": "רווח נעול",
     "card.waiting": "ממתין לתמחור מהספר…",
@@ -774,6 +802,15 @@ const I18N = {
     "panel.scanner": "Opportunity scanner",
     "leg.early": "Early",
     "leg.late": "Late",
+    "leg.a": "Market A",
+    "leg.b": "Market B",
+    "filter.all": "All",
+    "filter.calendar": "Calendar",
+    "filter.duplicate": "Duplicate",
+    "strategy.calendar.short": "Calendar",
+    "strategy.duplicate.short": "Duplicate",
+    "strategy.calendar.tip": "Calendar Arbitrage — two markets for the same event with different deadlines. Buys NO on the earlier and YES on the later; if the late market is cheaper than the early, the gap locks in risk-free profit at resolution.",
+    "strategy.duplicate.tip": "Duplicate Arbitrage — two distinct markets resolving on IDENTICAL criteria (same event, same end date). If ask_YES(A) + ask_NO(B) < $1, buying both legs guarantees a $1 payout and pockets the gap.",
     "card.totalCost": "Entry cost",
     "card.lockedProfit": "Locked profit",
     "card.waiting": "Waiting for orderbook pricing…",
@@ -923,6 +960,17 @@ function liveClock(updatedAt) {
   return `<span class="pair-clock ${fresh ? "is-live" : ""}"><span class="dot"></span>${fmtTs(updatedAt)}</span>`;
 }
 
+/* Strategy attribution badge — distinguishes Calendar arb pairs from
+   Duplicate (cross-market) arb pairs. Hoverable tooltip explains the
+   mechanic so new users understand what the bot is looking for. */
+function strategyBadge(p) {
+  const strat = p.strategy || "calendar";
+  if (strat === "duplicate") {
+    return `<span class="strategy-badge duplicate" title="${escapeHtml(t("strategy.duplicate.tip"))}">🔁 ${t("strategy.duplicate.short")}</span>`;
+  }
+  return `<span class="strategy-badge calendar" title="${escapeHtml(t("strategy.calendar.tip"))}">📅 ${t("strategy.calendar.short")}</span>`;
+}
+
 /* Pick the best text for the current locale. Backend emits Hebrew
    companions as `<field>_he`; we fall back to the English source when
    the translation hasn't arrived yet. */
@@ -970,10 +1018,31 @@ function renderPairCard(p) {
       </div>`;
   }
 
+  const isDup = p.strategy === "duplicate";
+
+  // Choose labels + question fields based on strategy
+  let labelA, labelB, qA, qB, endA, endB;
+  if (isDup) {
+    labelA = t("leg.a");
+    labelB = t("leg.b");
+    qA = localized(p, 'a_question') || p.a_question || live.a_question || "—";
+    qB = localized(p, 'b_question') || p.b_question || live.b_question || "—";
+    endA = p.a_end || live.a_end;
+    endB = p.b_end || live.b_end;
+  } else {
+    labelA = t("leg.early");
+    labelB = t("leg.late");
+    qA = localized(live, 'early_question') || localized(p, 'early_question') || "—";
+    qB = localized(live, 'late_question') || "—";
+    endA = live.early_end;
+    endB = live.late_end;
+  }
+
   return `
-    <div class="pair" data-pair="${escapeHtml(p.pair_key || "")}">
+    <div class="pair" data-pair="${escapeHtml(p.pair_key || "")}" data-strategy="${escapeHtml(p.strategy || "calendar")}">
       <div class="pair-head">
         <div class="pair-pills">
+          ${strategyBadge(p)}
           ${sourcePill(p)}
           ${live.days_until_close != null ? daysPill(live.days_until_close) : ""}
           ${p.tier === "confirmed" ? '<span class="pill pill-g">● active</span>' : ""}
@@ -983,19 +1052,20 @@ function renderPairCard(p) {
       </div>
       <div>
         <div class="leg">
-          <span class="leg-label">${t("leg.early")}</span>
-          <span class="leg-q" title="${escapeHtml(localized(live, 'early_desc') || p.early_question || '')}">${escapeHtml(localized(live, 'early_question') || localized(p, 'early_question') || "—")}${legLink(live.early_event_slug, live.early_slug)}</span>
+          <span class="leg-label">${labelA}</span>
+          <span class="leg-q" title="${escapeHtml(localized(live, 'early_desc') || p.early_question || '')}">${escapeHtml(qA)}${isDup ? "" : legLink(live.early_event_slug, live.early_slug)}</span>
         </div>
         <div class="leg">
-          <span class="leg-label">${t("leg.late")}</span>
-          <span class="leg-q" title="${escapeHtml(localized(live, 'late_desc') || '')}">${escapeHtml(localized(live, 'late_question') || "—")}${legLink(live.late_event_slug, live.late_slug)}</span>
+          <span class="leg-label">${labelB}</span>
+          <span class="leg-q" title="${escapeHtml(localized(live, 'late_desc') || '')}">${escapeHtml(qB)}${isDup ? "" : legLink(live.late_event_slug, live.late_slug)}</span>
         </div>
       </div>
       <div class="divider"></div>
       ${profitBlock}
       <div class="meta-row">
-        ${live.early_end ? `<span>${t("card.endsPrefix")} ${fmtDate(live.early_end)}</span><span class="meta-sep">·</span>` : ""}
-        ${live.late_end ? `<span>${t("card.endsPrefix")} ${fmtDate(live.late_end)}</span>` : ""}
+        ${endA ? `<span>${t("card.endsPrefix")} ${fmtDate(endA)}</span><span class="meta-sep">·</span>` : ""}
+        ${endB ? `<span>${t("card.endsPrefix")} ${fmtDate(endB)}</span>` : ""}
+        ${isDup && p.llm_confidence != null ? `<span class="meta-sep">·</span><span>conf ${(p.llm_confidence*100).toFixed(0)}%</span>` : ""}
       </div>
     </div>`;
 }
@@ -1005,6 +1075,7 @@ const state = {
   lastData: null,
   view: "overview",
   pairsTier: "all",
+  pairsStrategy: "all",   // "all" | "calendar" | "duplicate"
   search: "",
   positions: null,
 };
@@ -1156,23 +1227,43 @@ function renderOverview() {
 
 function renderPairsView() {
   const pairs = state.lastData?.pairs?.discovered || [];
+  const byStrategy = state.lastData?.pairs?.by_strategy || {};
   const counts = { all: pairs.length, confirmed: 0, pending: 0, probe: 0, rejected: 0 };
   pairs.forEach(p => counts[p.tier] = (counts[p.tier] || 0) + 1);
   const chipKeys = ["all", "confirmed", "pending", "probe", "rejected"];
-  document.getElementById("pairs-chips").innerHTML = chipKeys.map(k => `
+  const tierChips = chipKeys.map(k => `
     <button class="chip ${state.pairsTier === k ? 'active' : ''}" data-tier="${k}">
       ${t(`chip.${k}`)}<span class="count">${counts[k] || 0}</span>
     </button>`).join("");
+  // Strategy filter chips (in front of the tier chips so they feel primary)
+  const calCount = byStrategy.calendar?.discovered || 0;
+  const dupCount = byStrategy.duplicate?.discovered || 0;
+  const strategyChips = `
+    <button class="chip strategy-chip ${state.pairsStrategy === 'all' ? 'active' : ''}" data-strategy="all">
+      ${t("filter.all")}<span class="count">${calCount + dupCount}</span>
+    </button>
+    <button class="chip strategy-chip ${state.pairsStrategy === 'calendar' ? 'active' : ''}" data-strategy="calendar"
+            title="${escapeHtml(t("strategy.calendar.tip"))}">
+      📅 ${t("filter.calendar")}<span class="count">${calCount}</span>
+    </button>
+    <button class="chip strategy-chip ${state.pairsStrategy === 'duplicate' ? 'active' : ''}" data-strategy="duplicate"
+            title="${escapeHtml(t("strategy.duplicate.tip"))}">
+      🔁 ${t("filter.duplicate")}<span class="count">${dupCount}</span>
+    </button>
+    <span style="display: inline-block; width: 12px;"></span>`;
+  document.getElementById("pairs-chips").innerHTML = strategyChips + tierChips;
   // Wire chip clicks
   document.querySelectorAll("#pairs-chips .chip").forEach(el => {
     el.addEventListener("click", () => {
-      state.pairsTier = el.dataset.tier;
+      if (el.dataset.strategy) state.pairsStrategy = el.dataset.strategy;
+      else if (el.dataset.tier) state.pairsTier = el.dataset.tier;
       renderPairsView();
     });
   });
-  // Filter by tier + search
+  // Filter by strategy + tier + search
   const search = state.search.trim().toLowerCase();
   let list = pairs.slice();
+  if (state.pairsStrategy !== "all") list = list.filter(p => (p.strategy || "calendar") === state.pairsStrategy);
   if (state.pairsTier !== "all") list = list.filter(p => p.tier === state.pairsTier);
   if (search) list = list.filter(p => (p._search || "").includes(search));
   list.sort((a, b) => {
