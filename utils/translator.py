@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 TRANSLATIONS_FILE = os.path.join("data", "translations.json")
 BATCH_SIZE = 10
 MAX_BATCHES_PER_FLUSH = 1  # share daily quota with the discovery LLM
+# After a 429 response we back off for this many seconds before another
+# flush. Gemini's free-tier quota is per-minute; this keeps us from
+# hammering the endpoint on every 10s scan and burning discovery's share.
+COOLDOWN_AFTER_429_SEC = 70.0
 # Use a different model than the discovery agent so the translator
 # doesn't contend with it for the same per-minute Gemini quota. Free-tier
 # limits are per-model; gemini-2.0-flash-lite has 30 RPM of headroom
@@ -77,6 +81,13 @@ class GeminiTranslator:
         self.url = f"{base}/models/{self.model}:generateContent"
         self.cache: Dict[str, str] = self._load()
         self._pending: Set[str] = set()
+        # Unix ts the translator is allowed to try again. Bumped on 429 so
+        # we don't wastefully re-hit the quota every 10s.
+        self._cooldown_until: float = 0.0
+        # Save cleaned cache immediately if load dropped entries, so
+        # restarting while every flush 429s still leaves us with a
+        # correct on-disk state.
+        self._save()
         if self.enabled:
             logger.info(
                 f"🌐 Translator initialized | cached={len(self.cache)} | model={self.model}"
@@ -130,6 +141,9 @@ class GeminiTranslator:
 
     async def flush(self) -> int:
         if not self.enabled or not self._pending:
+            return 0
+        import time as _time
+        if _time.time() < self._cooldown_until:
             return 0
         pending = sorted(self._pending)
         # Only take MAX_BATCHES_PER_FLUSH * BATCH_SIZE this call; the rest
@@ -192,6 +206,9 @@ class GeminiTranslator:
             logger.warning(
                 f"Translator HTTP {r.status_code} @ {safe_url}: {r.text[:200]}"
             )
+            if r.status_code == 429:
+                import time as _time
+                self._cooldown_until = _time.time() + COOLDOWN_AFTER_429_SEC
             return [""] * len(texts)
         data = r.json()
         try:
