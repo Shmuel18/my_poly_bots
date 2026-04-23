@@ -246,14 +246,19 @@ class CalendarArbitrageStrategy(BaseStrategy):
     # Gamma pagination hiccups / 5xx responses wiping out live pairs.
     PURGE_AFTER_MISSING_SCANS = 5
 
-    def _cleanup_expired_pairs(self, active_market_ids: set):
-        """Prune pairs whose markets have vanished from Gamma.
+    def _cleanup_expired_pairs(self, healthy_pair_keys: set):
+        """Prune pairs that consistently fail to produce a price snapshot.
 
-        Each pair carries a ``missing_scans`` counter. Present markets reset
-        it to 0; absent ones bump it, and the pair is purged once the
-        counter hits ``PURGE_AFTER_MISSING_SCANS``. Related state in the
-        confirmed/pending/rejected files is dropped alongside so the
-        dashboard and Telegram flow don't keep referencing ghost markets.
+        A pair is "healthy" on a given scan if the monitoring phase
+        managed to build a snap_entry for it — meaning both markets
+        were present in Gamma, passed ``_validate_temporal_containment``,
+        and had two-outcome token IDs. Anything else bumps the pair's
+        ``missing_scans`` counter; once it hits
+        ``PURGE_AFTER_MISSING_SCANS`` consecutive unhealthy scans the
+        pair is dropped along with any confirmed/pending/rejected
+        references so the dashboard and Telegram flow stop showing
+        ghost cards. The grace window guards against transient Gamma
+        pagination hiccups that would otherwise flash-purge every pair.
         """
         threshold = self.PURGE_AFTER_MISSING_SCANS
         kept: List[Dict[str, Any]] = []
@@ -261,12 +266,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
         counter_changed = False
 
         for p in self.discovered_pairs:
-            present = (
-                p.get('early_id') in active_market_ids
-                and p.get('late_id') in active_market_ids
-            )
+            key = self._pair_key(p.get('early_id', ''), p.get('late_id', ''))
             prev = p.get('missing_scans', 0)
-            if present:
+            if key in healthy_pair_keys:
                 if prev != 0:
                     p['missing_scans'] = 0
                     counter_changed = True
@@ -786,11 +788,6 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # obvious opportunities even if GEMINI_API_KEY is unset/invalid.
         self._regex_discover_obvious_pairs(all_markets)
 
-        # Prune pairs whose markets have fallen out of Gamma's active feed.
-        # Runs every scan (with an internal grace counter) so stale pairs
-        # don't linger until the next full LLM discovery cycle.
-        self._cleanup_expired_pairs(active_ids)
-
         # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
             start = self.market_offset
@@ -839,6 +836,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
         opportunities = []
         import time as _time
         price_snapshot: Dict[str, Any] = {}
+        # Pair keys we successfully priced this scan. Anything NOT in this
+        # set (market missing, temporal containment failed, bad token IDs)
+        # will have its missing_scans counter bumped by _cleanup_expired_pairs
+        # at the end of this scan.
+        healthy_pair_keys: set = set()
         snapshot_now = _time.time()
 
         for pair in self.discovered_pairs:
@@ -900,6 +902,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 snap_entry["bid_yes_late"] = bid_yes["price"]
                 snap_entry["exit_value"] = round(exit_value, 4)
             price_snapshot[pair_key] = snap_entry
+            healthy_pair_keys.add(pair_key)
 
             # Arb decision path (unchanged from previous version)
             if not ask_no or not ask_yes: continue
@@ -939,6 +942,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
         # Persist snapshot for the dashboard
         self._save_json_state(self.PRICE_SNAPSHOT_FILE, price_snapshot)
+
+        # Bump miss-counters and purge anything that's been unhealthy for
+        # PURGE_AFTER_MISSING_SCANS consecutive scans. Runs after the
+        # monitoring loop so we have an accurate healthy_pair_keys set.
+        self._cleanup_expired_pairs(healthy_pair_keys)
         return opportunities
 
     async def should_enter(self, opportunity: Dict[str, Any]) -> bool:
