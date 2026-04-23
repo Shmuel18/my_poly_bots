@@ -805,6 +805,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     tuple(sorted((p.get('early_id', ''), p.get('late_id', ''))))
                     for p in self.discovered_pairs
                 }
+                import time as _time
+                now_ts = _time.time()
+                pending_changed = False
                 for b_early, b_late, reason, confidence in new_pairs:
                     early_id, late_id = batch[b_early]['id'], batch[b_late]['id']
                     pair_key = tuple(sorted((early_id, late_id)))
@@ -821,7 +824,32 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     self.logger.info(
                         f"✨ New pair (conf={confidence:.2f}): {batch[b_early]['question']}"
                     )
+                    # Route LLM-discovered pairs through a pre-trade Telegram
+                    # verification gate. Regex matches go straight to
+                    # confirmed_pairs (see _regex_discover_obvious_pairs) —
+                    # only uncertain LLM matches need human sign-off. The
+                    # pair sits at tier "pending" (size=0 via _size_for_tier)
+                    # until the user replies ✅ or ❌.
+                    str_key = self._pair_key(early_id, late_id)
+                    if (str_key not in self.confirmed_pairs
+                        and str_key not in self.rejected_pairs
+                        and str_key not in self.pending_pairs):
+                        self.pending_pairs[str_key] = {
+                            "opened_at": now_ts,
+                            "early_id": early_id,
+                            "late_id": late_id,
+                            "early_question": batch[b_early].get("question", ""),
+                            "late_question": batch[b_late].get("question", ""),
+                            "llm_reason": reason,
+                            "llm_confidence": confidence,
+                            "discovery_method": "llm",
+                            "source": "pre_trade_verification",
+                            "alerted": False,
+                        }
+                        pending_changed = True
                 self._save_discovered_pairs()
+                if pending_changed:
+                    self._save_json_state(self.PENDING_FILE, self.pending_pairs)
             except Exception as e:
                 self.logger.error(f"❌ LLM failed: {e}")
 
@@ -948,11 +976,14 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # monitoring loop so we have an accurate healthy_pair_keys set.
         self._cleanup_expired_pairs(healthy_pair_keys)
 
-        # Dashboard heartbeat. Lives here (end of scan()) rather than in
-        # the legacy run() loop because BaseStrategy.scan_loop() is what
-        # actually drives scanning — run() is dead code kept around for
-        # backward compat. Without this call the dashboard never gets a
-        # status_snapshot.json and falls back to log-scraping for balance.
+        # Human-in-the-loop Telegram flow. Both of these also live in the
+        # legacy run() loop, but BaseStrategy.scan_loop() never calls run()
+        # — so without wiring them here, the bot would silently never send
+        # pair-alerts or process ✅/❌ replies.
+        await self._check_escalations(market_map)
+        await self._process_telegram_replies()
+
+        # Dashboard heartbeat — writes data/status_snapshot.json.
         await self._write_heartbeat_snapshot()
         return opportunities
 
@@ -1450,7 +1481,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
             if state.get("alerted"):
                 continue
             opened_at = state.get("opened_at", now)
-            if now - opened_at < self.escalation_seconds:
+            # Pre-trade verification pairs bypass the 30-min grace window —
+            # they have no position yet, so we want the user to see them
+            # immediately on the next scan. Probe-then-escalate pairs still
+            # wait escalation_seconds so we don't spam at the 1-min mark.
+            is_pre_trade = state.get("source") == "pre_trade_verification"
+            if not is_pre_trade and now - opened_at < self.escalation_seconds:
                 continue
 
             early_id = state.get("early_id")
@@ -1465,15 +1501,21 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             tid_early = self._get_token_ids(early)
             tid_late = self._get_token_ids(late)
-            if len(tid_early) < 2 or len(tid_late) < 2:
+            ask_no = ask_yes = None
+            total_cost = None
+            roi = None
+            if len(tid_early) >= 2 and len(tid_late) >= 2:
+                ask_no = self._best_ask(tid_early[1])
+                ask_yes = self._best_ask(tid_late[0])
+                if ask_no and ask_yes:
+                    total_cost = ask_no["price"] + ask_yes["price"]
+                    days = self._days_until_close(late.get("endDate"))
+                    roi = self._calculate_annualized_roi(1.0 - total_cost, days)
+            # Probe-escalation needs live pricing (the whole point is "is
+            # the spread still exploitable?"). Pre-trade verification only
+            # needs identity confirmation, so send even without a book.
+            if (ask_no is None or ask_yes is None) and not is_pre_trade:
                 continue
-            ask_no = self._best_ask(tid_early[1])
-            ask_yes = self._best_ask(tid_late[0])
-            if not ask_no or not ask_yes:
-                continue
-            total_cost = ask_no["price"] + ask_yes["price"]
-            days = self._days_until_close(late.get("endDate"))
-            roi = self._calculate_annualized_roi(1.0 - total_cost, days)
 
             alert_info = {
                 "early_question": early.get("question", ""),
@@ -1482,10 +1524,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "late_desc": late.get("description", ""),
                 "early_end": early.get("endDate"),
                 "late_end": late.get("endDate"),
-                "ask_no_early": ask_no["price"],
-                "ask_yes_late": ask_yes["price"],
-                "total_cost": total_cost,
-                "annualized_roi": roi,
+                "ask_no_early": ask_no["price"] if ask_no else 0,
+                "ask_yes_late": ask_yes["price"] if ask_yes else 0,
+                "total_cost": total_cost if total_cost is not None else 0,
+                "annualized_roi": roi if roi is not None else 0,
             }
             ok = await self.telegram.send_pair_alert(pair_key, alert_info)
             if ok:
