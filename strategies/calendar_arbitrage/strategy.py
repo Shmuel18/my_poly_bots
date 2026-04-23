@@ -241,16 +241,75 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return 0.0
         return max(1.0, round(usd / combined_ask, 2))
 
+    # How many consecutive scans a pair's market must be absent from Gamma
+    # before we purge the pair. ~5 scans of grace guards against transient
+    # Gamma pagination hiccups / 5xx responses wiping out live pairs.
+    PURGE_AFTER_MISSING_SCANS = 5
+
     def _cleanup_expired_pairs(self, active_market_ids: set):
-        """ניקוי שווקים שנסגרו."""
-        initial_count = len(self.discovered_pairs)
-        self.discovered_pairs = [
-            p for p in self.discovered_pairs 
-            if p['early_id'] in active_market_ids and p['late_id'] in active_market_ids
-        ]
-        if len(self.discovered_pairs) < initial_count:
-            self.logger.info(f"🧹 Cleanup: Removed {initial_count - len(self.discovered_pairs)} expired pairs.")
-            self._save_discovered_pairs()
+        """Prune pairs whose markets have vanished from Gamma.
+
+        Each pair carries a ``missing_scans`` counter. Present markets reset
+        it to 0; absent ones bump it, and the pair is purged once the
+        counter hits ``PURGE_AFTER_MISSING_SCANS``. Related state in the
+        confirmed/pending/rejected files is dropped alongside so the
+        dashboard and Telegram flow don't keep referencing ghost markets.
+        """
+        threshold = self.PURGE_AFTER_MISSING_SCANS
+        kept: List[Dict[str, Any]] = []
+        dropped: List[Dict[str, Any]] = []
+        counter_changed = False
+
+        for p in self.discovered_pairs:
+            present = (
+                p.get('early_id') in active_market_ids
+                and p.get('late_id') in active_market_ids
+            )
+            prev = p.get('missing_scans', 0)
+            if present:
+                if prev != 0:
+                    p['missing_scans'] = 0
+                    counter_changed = True
+                kept.append(p)
+                continue
+            new_count = prev + 1
+            p['missing_scans'] = new_count
+            counter_changed = True
+            if new_count >= threshold:
+                dropped.append(p)
+            else:
+                kept.append(p)
+
+        if not dropped and not counter_changed:
+            return
+
+        self.discovered_pairs = kept
+
+        if dropped:
+            dropped_keys = {
+                self._pair_key(p['early_id'], p['late_id']) for p in dropped
+            }
+            self.confirmed_pairs = {
+                k: v for k, v in self.confirmed_pairs.items() if k not in dropped_keys
+            }
+            self.pending_pairs = {
+                k: v for k, v in self.pending_pairs.items() if k not in dropped_keys
+            }
+            self.rejected_pairs = {
+                k: v for k, v in self.rejected_pairs.items() if k not in dropped_keys
+            }
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self._save_json_state(self.PENDING_FILE, self.pending_pairs)
+            self._save_json_state(self.REJECTED_FILE, self.rejected_pairs)
+            sample = ", ".join(
+                (p.get('early_question') or p['early_id'])[:40] for p in dropped[:3]
+            )
+            self.logger.info(
+                f"🧹 Cleanup: purged {len(dropped)} stale pair(s) absent "
+                f"≥{threshold} scans. Sample: {sample}"
+            )
+
+        self._save_discovered_pairs()
 
     def _save_discovered_pairs(self):
         try:
@@ -727,6 +786,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # obvious opportunities even if GEMINI_API_KEY is unset/invalid.
         self._regex_discover_obvious_pairs(all_markets)
 
+        # Prune pairs whose markets have fallen out of Gamma's active feed.
+        # Runs every scan (with an internal grace counter) so stale pairs
+        # don't linger until the next full LLM discovery cycle.
+        self._cleanup_expired_pairs(active_ids)
+
         # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
             start = self.market_offset
@@ -767,7 +831,8 @@ class CalendarArbitrageStrategy(BaseStrategy):
             self.market_offset = end
             if self.market_offset >= len(all_markets):
                 self.market_offset = 0
-                self._cleanup_expired_pairs(active_ids)
+                # Cleanup now runs every scan at the top of scan(), no
+                # need for an extra pass on LLM cycle wraparound.
 
         # --- Monitoring Phase ---
         self.logger.info(f"📈 Checking prices for {len(self.discovered_pairs)} saved pairs...")
