@@ -46,6 +46,14 @@ def _key(text: str) -> str:
     return hashlib.sha1((text or "").strip().encode("utf-8")).hexdigest()[:16]
 
 
+def _has_hebrew(s: str) -> bool:
+    """True if the string contains at least one Hebrew character. Used to
+    reject cache values that slipped through as English (model timeout,
+    empty response, etc.) so we retry them next flush instead of
+    serving the wrong language forever."""
+    return any("\u0590" <= c <= "\u05FF" for c in s or "")
+
+
 def _redact_key_from_url(url: str) -> str:
     if "key=" not in url:
         return url
@@ -81,10 +89,20 @@ class GeminiTranslator:
         if not p.exists():
             return {}
         try:
-            return json.loads(p.read_text(encoding="utf-8"))
+            raw = json.loads(p.read_text(encoding="utf-8"))
         except Exception as e:
             logger.warning(f"translations.json read failed: {e}")
             return {}
+        # Purge any entries where the cached "translation" is actually
+        # English (left over from an earlier bug where failed responses
+        # were stored as the source text). Letting those through would
+        # render English on the dashboard under he mode forever.
+        cleaned = {k: v for k, v in raw.items() if _has_hebrew(v)}
+        if len(cleaned) != len(raw):
+            logger.info(
+                f"🌐 Translator cache: dropped {len(raw) - len(cleaned)} non-Hebrew entries on load"
+            )
+        return cleaned
 
     def _save(self):
         p = Path(TRANSLATIONS_FILE)
@@ -133,13 +151,13 @@ class GeminiTranslator:
                     self._pending.add(t)
                 break
             for src, tgt in zip(batch, translations):
-                if tgt:
+                if tgt and _has_hebrew(tgt):
                     self.cache[_key(src)] = tgt
                     done += 1
-                else:
-                    # Mark as translated-to-self so we don't hammer the
-                    # API on a string it can't handle.
-                    self.cache[_key(src)] = src
+                # Else: leave it out of the cache. It'll land back in
+                # _pending on the next queue() call and get retried.
+                # Caching an English fallback would make every future
+                # lookup return the wrong language.
         if done:
             self._save()
             logger.info(
