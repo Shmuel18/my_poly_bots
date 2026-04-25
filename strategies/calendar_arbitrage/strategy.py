@@ -65,13 +65,13 @@ class CalendarArbitrageStrategy(BaseStrategy):
         min_profit_threshold: float = 0.01,
         max_pairs: int = 1000,
         dry_run: bool = False,
-        early_exit_threshold: float = 0.005,
+        early_exit_threshold: float = 0.20,
         min_annualized_roi: float = 0.15,
         check_invalid_risk: bool = True,
         use_embeddings: bool = True,
         similarity_threshold: float = 0.85,
         use_llm: bool = True,
-        llm_model: str = "gemini-2.0-flash",
+        llm_model: str = "gemini-2.5-flash-lite",
         use_database: bool = False,
         min_resolution_match_confidence: float = 0.9,
         probe_usd: float = 5.0,
@@ -113,6 +113,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self.CONFIRMED_FILE = os.path.join("data", "confirmed_pairs.json")
         self.PENDING_FILE = os.path.join("data", "pending_confirmation.json")
         self.REJECTED_FILE = os.path.join("data", "rejected_pairs.json")
+        # Live price snapshot: dashboard reads this file to render pair cards
+        # with current ask/bid and running profit %.
+        self.PRICE_SNAPSHOT_FILE = os.path.join("data", "price_snapshot.json")
         self.confirmed_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.CONFIRMED_FILE)
         self.pending_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.PENDING_FILE)
         self.rejected_pairs: Dict[str, Dict[str, Any]] = self._load_json_state(self.REJECTED_FILE)
@@ -126,6 +129,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
             except Exception as e:
                 self.logger.warning(f"Telegram init failed: {e}")
                 self.telegram = None
+
+        # Hebrew translator (shares GEMINI_API_KEY with the discovery LLM,
+        # but throttled to one batch/scan so it never starves discovery).
+        # Disabled automatically if no GEMINI_API_KEY is set.
+        self.translator = None
+        try:
+            from utils.translator import GeminiTranslator
+            self.translator = GeminiTranslator()
+        except Exception as e:
+            self.logger.warning(f"Translator init failed: {e}")
+            self.translator = None
 
         # 3. טעינת זוגות שנשמרו מהעבר
         self.discovered_pairs = self._load_discovered_pairs()
@@ -197,6 +211,24 @@ class CalendarArbitrageStrategy(BaseStrategy):
         a, b = sorted((str(early_id), str(late_id)))
         return f"{a[:12]}__{b[:12]}"
 
+    @staticmethod
+    def _event_slug(market: Dict[str, Any]) -> Optional[str]:
+        """Extract the parent event's slug from a Gamma market dict.
+
+        Gamma markets carry an ``events`` array; the first event's ``slug``
+        powers the canonical URL ``https://polymarket.com/event/<slug>``.
+        Returns None if the shape is unexpected so the dashboard can hide
+        the link gracefully.
+        """
+        events = market.get("events") or []
+        if isinstance(events, list) and events:
+            first = events[0]
+            if isinstance(first, dict):
+                slug = first.get("slug")
+                if isinstance(slug, str) and slug:
+                    return slug
+        return None
+
     def _get_tier_status(self, early_id: str, late_id: str) -> str:
         """Returns one of: 'rejected', 'confirmed', 'pending', 'probe'."""
         key = self._pair_key(early_id, late_id)
@@ -220,16 +252,77 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return 0.0
         return max(1.0, round(usd / combined_ask, 2))
 
-    def _cleanup_expired_pairs(self, active_market_ids: set):
-        """ניקוי שווקים שנסגרו."""
-        initial_count = len(self.discovered_pairs)
-        self.discovered_pairs = [
-            p for p in self.discovered_pairs 
-            if p['early_id'] in active_market_ids and p['late_id'] in active_market_ids
-        ]
-        if len(self.discovered_pairs) < initial_count:
-            self.logger.info(f"🧹 Cleanup: Removed {initial_count - len(self.discovered_pairs)} expired pairs.")
-            self._save_discovered_pairs()
+    # How many consecutive scans a pair's market must be absent from Gamma
+    # before we purge the pair. ~5 scans of grace guards against transient
+    # Gamma pagination hiccups / 5xx responses wiping out live pairs.
+    PURGE_AFTER_MISSING_SCANS = 5
+
+    def _cleanup_expired_pairs(self, healthy_pair_keys: set):
+        """Prune pairs that consistently fail to produce a price snapshot.
+
+        A pair is "healthy" on a given scan if the monitoring phase
+        managed to build a snap_entry for it — meaning both markets
+        were present in Gamma, passed ``_validate_temporal_containment``,
+        and had two-outcome token IDs. Anything else bumps the pair's
+        ``missing_scans`` counter; once it hits
+        ``PURGE_AFTER_MISSING_SCANS`` consecutive unhealthy scans the
+        pair is dropped along with any confirmed/pending/rejected
+        references so the dashboard and Telegram flow stop showing
+        ghost cards. The grace window guards against transient Gamma
+        pagination hiccups that would otherwise flash-purge every pair.
+        """
+        threshold = self.PURGE_AFTER_MISSING_SCANS
+        kept: List[Dict[str, Any]] = []
+        dropped: List[Dict[str, Any]] = []
+        counter_changed = False
+
+        for p in self.discovered_pairs:
+            key = self._pair_key(p.get('early_id', ''), p.get('late_id', ''))
+            prev = p.get('missing_scans', 0)
+            if key in healthy_pair_keys:
+                if prev != 0:
+                    p['missing_scans'] = 0
+                    counter_changed = True
+                kept.append(p)
+                continue
+            new_count = prev + 1
+            p['missing_scans'] = new_count
+            counter_changed = True
+            if new_count >= threshold:
+                dropped.append(p)
+            else:
+                kept.append(p)
+
+        if not dropped and not counter_changed:
+            return
+
+        self.discovered_pairs = kept
+
+        if dropped:
+            dropped_keys = {
+                self._pair_key(p['early_id'], p['late_id']) for p in dropped
+            }
+            self.confirmed_pairs = {
+                k: v for k, v in self.confirmed_pairs.items() if k not in dropped_keys
+            }
+            self.pending_pairs = {
+                k: v for k, v in self.pending_pairs.items() if k not in dropped_keys
+            }
+            self.rejected_pairs = {
+                k: v for k, v in self.rejected_pairs.items() if k not in dropped_keys
+            }
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self._save_json_state(self.PENDING_FILE, self.pending_pairs)
+            self._save_json_state(self.REJECTED_FILE, self.rejected_pairs)
+            sample = ", ".join(
+                (p.get('early_question') or p['early_id'])[:40] for p in dropped[:3]
+            )
+            self.logger.info(
+                f"🧹 Cleanup: purged {len(dropped)} stale pair(s) absent "
+                f"≥{threshold} scans. Sample: {sample}"
+            )
+
+        self._save_discovered_pairs()
 
     def _save_discovered_pairs(self):
         try:
@@ -446,15 +539,42 @@ class CalendarArbitrageStrategy(BaseStrategy):
         
         return groups
 
+    @staticmethod
+    def _orderbook_side(book, side: str):
+        """py-clob-client returns OrderBookSummary (dataclass with .asks/.bids,
+        each entry an OrderSummary with .price/.size). Older code assumed a
+        dict. Accept either shape defensively."""
+        if not book:
+            return []
+        if hasattr(book, side):
+            return getattr(book, side) or []
+        if hasattr(book, "get"):
+            return book.get(side, []) or []
+        return []
+
+    @staticmethod
+    def _orderbook_entry(e):
+        """Return (price, size) floats from either an OrderSummary dataclass
+        or a {price, size} dict."""
+        if e is None:
+            return None, None
+        p = getattr(e, "price", None) if not isinstance(e, dict) else e.get("price")
+        s = getattr(e, "size", None) if not isinstance(e, dict) else e.get("size")
+        try:
+            return float(p), float(s) if s is not None else 0.0
+        except (TypeError, ValueError):
+            return None, None
+
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
         try:
             book = self.executor.client.get_order_book(token_id)
-            asks = book.get("asks", []) if book else []
+            asks = self._orderbook_side(book, "asks")
             if asks:
-                p = float(asks[0].get("price", 0))
-                s = float(asks[0].get("size", 0)) if asks[0].get("size") is not None else 0.0
-                return {"price": p, "size": s}
-        except Exception:
+                p, s = self._orderbook_entry(asks[0])
+                if p is not None:
+                    return {"price": p, "size": s or 0.0}
+        except Exception as e:
+            self.logger.debug(f"_best_ask failed for {token_id[:12]}: {e}")
             return None
         return None
 
@@ -462,12 +582,13 @@ class CalendarArbitrageStrategy(BaseStrategy):
         """Get best bid price (price we can sell at)."""
         try:
             book = self.executor.client.get_order_book(token_id)
-            bids = book.get("bids", []) if book else []
+            bids = self._orderbook_side(book, "bids")
             if bids:
-                p = float(bids[0].get("price", 0))
-                s = float(bids[0].get("size", 0)) if bids[0].get("size") is not None else 0.0
-                return {"price": p, "size": s}
-        except Exception:
+                p, s = self._orderbook_entry(bids[0])
+                if p is not None:
+                    return {"price": p, "size": s or 0.0}
+        except Exception as e:
+            self.logger.debug(f"_best_bid failed for {token_id[:12]}: {e}")
             return None
         return None
 
@@ -480,41 +601,43 @@ class CalendarArbitrageStrategy(BaseStrategy):
             book = self.executor.client.get_order_book(token_id)
             if not book:
                 return None
-            
+
             # For BUY: consume asks (sellers), for SELL: consume bids (buyers)
-            orders = book.get("asks" if side == "BUY" else "bids", [])
+            # Handles both OrderBookSummary dataclass and dict-shaped responses.
+            orders = self._orderbook_side(book, "asks" if side == "BUY" else "bids")
             if not orders:
                 return None
-            
+
             remaining_size = size
             total_cost = 0.0
             filled_size = 0.0
-            
+            first_price = None
+
             for order in orders:
-                order_price = float(order.get("price", 0))
-                order_size = float(order.get("size", 0)) if order.get("size") is not None else 0.0
-                
-                if order_size <= 0:
+                order_price, order_size = self._orderbook_entry(order)
+                if order_price is None or order_size is None or order_size <= 0:
                     continue
-                
+                if first_price is None:
+                    first_price = order_price
+
                 fill_amount = min(remaining_size, order_size)
                 total_cost += fill_amount * order_price
                 filled_size += fill_amount
                 remaining_size -= fill_amount
-                
+
                 if remaining_size <= 0:
                     break
-            
+
             if filled_size == 0:
                 return None
-            
+
             avg_price = total_cost / filled_size
             return {
                 "avg_price": avg_price,
                 "filled_size": filled_size,
                 "requested_size": size,
                 "fully_filled": remaining_size <= 0.01,  # tolerance
-                "slippage": (avg_price - float(orders[0].get("price", 0))) if orders else 0.0,
+                "slippage": (avg_price - first_price) if first_price is not None else 0.0,
             }
         except Exception as e:
             self.logger.debug(f"Error simulating fill: {e}")
@@ -676,6 +799,13 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # obvious opportunities even if GEMINI_API_KEY is unset/invalid.
         self._regex_discover_obvious_pairs(all_markets)
 
+        # Idempotent backfill: any LLM-discovered pair that predates the
+        # pre-trade-verification gate (so it's sitting at tier "probe" but
+        # never got a Telegram alert) is migrated into pending_pairs now.
+        # No-op for regex pairs (already confirmed) and for already-
+        # decided pairs (in confirmed / rejected / pending).
+        self._migrate_probe_llm_pairs_to_pending()
+
         # --- Discovery Phase (LLM) ---
         if self.use_llm and self._llm_agent:
             start = self.market_offset
@@ -693,6 +823,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     tuple(sorted((p.get('early_id', ''), p.get('late_id', ''))))
                     for p in self.discovered_pairs
                 }
+                import time as _time
+                now_ts = _time.time()
+                pending_changed = False
                 for b_early, b_late, reason, confidence in new_pairs:
                     early_id, late_id = batch[b_early]['id'], batch[b_late]['id']
                     pair_key = tuple(sorted((early_id, late_id)))
@@ -709,18 +842,53 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     self.logger.info(
                         f"✨ New pair (conf={confidence:.2f}): {batch[b_early]['question']}"
                     )
+                    # Route LLM-discovered pairs through a pre-trade Telegram
+                    # verification gate. Regex matches go straight to
+                    # confirmed_pairs (see _regex_discover_obvious_pairs) —
+                    # only uncertain LLM matches need human sign-off. The
+                    # pair sits at tier "pending" (size=0 via _size_for_tier)
+                    # until the user replies ✅ or ❌.
+                    str_key = self._pair_key(early_id, late_id)
+                    if (str_key not in self.confirmed_pairs
+                        and str_key not in self.rejected_pairs
+                        and str_key not in self.pending_pairs):
+                        self.pending_pairs[str_key] = {
+                            "opened_at": now_ts,
+                            "early_id": early_id,
+                            "late_id": late_id,
+                            "early_question": batch[b_early].get("question", ""),
+                            "late_question": batch[b_late].get("question", ""),
+                            "llm_reason": reason,
+                            "llm_confidence": confidence,
+                            "discovery_method": "llm",
+                            "source": "pre_trade_verification",
+                            "alerted": False,
+                        }
+                        pending_changed = True
                 self._save_discovered_pairs()
+                if pending_changed:
+                    self._save_json_state(self.PENDING_FILE, self.pending_pairs)
             except Exception as e:
                 self.logger.error(f"❌ LLM failed: {e}")
 
             self.market_offset = end
             if self.market_offset >= len(all_markets):
                 self.market_offset = 0
-                self._cleanup_expired_pairs(active_ids)
+                # Cleanup now runs every scan at the top of scan(), no
+                # need for an extra pass on LLM cycle wraparound.
 
         # --- Monitoring Phase ---
         self.logger.info(f"📈 Checking prices for {len(self.discovered_pairs)} saved pairs...")
         opportunities = []
+        import time as _time
+        price_snapshot: Dict[str, Any] = {}
+        # Pair keys we successfully priced this scan. Anything NOT in this
+        # set (market missing, temporal containment failed, bad token IDs)
+        # will have its missing_scans counter bumped by _cleanup_expired_pairs
+        # at the end of this scan.
+        healthy_pair_keys: set = set()
+        snapshot_now = _time.time()
+
         for pair in self.discovered_pairs:
             early, late = market_map.get(pair['early_id']), market_map.get(pair['late_id'])
             if not early or not late: continue
@@ -733,16 +901,88 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             no_early, yes_late = tid_early[1], tid_late[0]
             ask_no, ask_yes = self._best_ask(no_early), self._best_ask(yes_late)
-            if not ask_no or not ask_yes: continue
+            bid_no, bid_yes = self._best_bid(no_early), self._best_bid(yes_late)
 
+            pair_key = self._pair_key(pair['early_id'], pair['late_id'])
+            days = self._days_until_close(late.get("endDate"))
+            tier = self._get_tier_status(pair['early_id'], pair['late_id'])
+
+            # Build snapshot entry for this pair (even if no arb opportunity right
+            # now — the dashboard still wants to render it).
+            early_q = early.get('question', '')
+            late_q = late.get('question', '')
+            # Cap descriptions — some Gamma entries run many KB and we don't
+            # want the snapshot (or the translator request) to blow up.
+            early_desc = (early.get('description') or '')[:400]
+            late_desc = (late.get('description') or '')[:400]
+
+            snap_entry: Dict[str, Any] = {
+                "pair_key": pair_key,
+                "early_id": pair['early_id'],
+                "late_id": pair['late_id'],
+                "early_question": early_q,
+                "late_question": late_q,
+                "early_desc": early_desc,
+                "late_desc": late_desc,
+                "early_end": early.get('endDate'),
+                "late_end": late.get('endDate'),
+                "days_until_close": days,
+                "tier": tier,
+                "discovery_method": pair.get("discovery_method", "llm"),
+                "resolution_match_confidence": pair.get("resolution_match_confidence"),
+                # Slugs power per-leg Polymarket links on the dashboard. We
+                # refresh them every scan from the live market map so legacy
+                # pairs pick them up without a migration.
+                "early_slug": early.get("slug"),
+                "late_slug": late.get("slug"),
+                "early_event_slug": self._event_slug(early),
+                "late_event_slug": self._event_slug(late),
+                "updated_at": snapshot_now,
+            }
+            # Attach cached Hebrew translations (no-op if translator is
+            # disabled). Missing strings get queued for the next flush so
+            # they'll appear on a later scan.
+            if self.translator is not None:
+                for f_src, f_he in (
+                    ("early_question", "early_question_he"),
+                    ("late_question", "late_question_he"),
+                    ("early_desc", "early_desc_he"),
+                    ("late_desc", "late_desc_he"),
+                ):
+                    src = snap_entry.get(f_src) or ""
+                    if src:
+                        self.translator.queue(src)
+                        he = self.translator.lookup(src)
+                        if he:
+                            snap_entry[f_he] = he
+            if ask_no and ask_yes:
+                total_cost = ask_no["price"] + ask_yes["price"]
+                snap_entry.update({
+                    "ask_no_early": ask_no["price"],
+                    "ask_yes_late": ask_yes["price"],
+                    "total_cost": total_cost,
+                    "entry_profit_usd": round(1.0 - total_cost, 4),
+                    "entry_profit_pct": round((1.0 - total_cost) * 100, 2),
+                    "annualized_roi": round(
+                        self._calculate_annualized_roi(1.0 - total_cost, days) * 100, 2
+                    ),
+                })
+            if bid_no and bid_yes:
+                exit_value = bid_no["price"] + bid_yes["price"]
+                snap_entry["bid_no_early"] = bid_no["price"]
+                snap_entry["bid_yes_late"] = bid_yes["price"]
+                snap_entry["exit_value"] = round(exit_value, 4)
+            price_snapshot[pair_key] = snap_entry
+            healthy_pair_keys.add(pair_key)
+
+            # Arb decision path (unchanged from previous version)
+            if not ask_no or not ask_yes: continue
             total_cost = ask_no["price"] + ask_yes["price"]
             if total_cost < (1.0 - (self.min_profit_threshold + 2*self.estimated_fee)):
                 if self._has_invalid_risk(early) or self._has_invalid_risk(late): continue
-                
-                days = self._days_until_close(late.get("endDate"))
+
                 roi = self._calculate_annualized_roi(1.0 - total_cost, days)
                 if roi >= self.min_annualized_roi:
-                    tier = self._get_tier_status(pair['early_id'], pair['late_id'])
                     if tier == "rejected":
                         continue  # user-blacklisted
                     if tier == "pending":
@@ -762,7 +1002,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "days_until_close": days,
                         "size": size,
                         "tier": tier,
-                        "pair_key": self._pair_key(pair['early_id'], pair['late_id']),
+                        "pair_key": pair_key,
                         "early_id": pair['early_id'], "late_id": pair['late_id'],
                         "early_desc": early.get("description", ""),
                         "late_desc": late.get("description", ""),
@@ -770,7 +1010,144 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "annualized_roi": roi, "llm_reason": pair.get("description", ""),
                         "early_question": early['question'], "late_question": late['question']
                     })
+
+        # Persist snapshot for the dashboard
+        self._save_json_state(self.PRICE_SNAPSHOT_FILE, price_snapshot)
+
+        # Bump miss-counters and purge anything that's been unhealthy for
+        # PURGE_AFTER_MISSING_SCANS consecutive scans. Runs after the
+        # monitoring loop so we have an accurate healthy_pair_keys set.
+        self._cleanup_expired_pairs(healthy_pair_keys)
+
+        # Human-in-the-loop Telegram flow. Both of these also live in the
+        # legacy run() loop, but BaseStrategy.scan_loop() never calls run()
+        # — so without wiring them here, the bot would silently never send
+        # pair-alerts or process ✅/❌ replies.
+        await self._check_escalations(market_map)
+        await self._process_telegram_replies()
+
+        # Flush any Hebrew translations queued while building snap_entries.
+        # Throttled internally to one Gemini batch per scan to respect the
+        # shared free-tier quota.
+        if self.translator is not None:
+            try:
+                await self.translator.flush()
+            except Exception as e:
+                self.logger.debug(f"Translator flush failed: {e}")
+
+        # Dashboard heartbeat — writes data/status_snapshot.json.
+        await self._write_heartbeat_snapshot()
         return opportunities
+
+    def _migrate_probe_llm_pairs_to_pending(self):
+        """Ensure every LLM-discovered pair that isn't already decided sits
+        in pending_pairs awaiting ✅/❌. Idempotent — called each scan so
+        pairs from before the pre-trade-verification gate was introduced
+        still end up getting their alert."""
+        import time as _time
+        now = _time.time()
+        changed = False
+        for p in self.discovered_pairs:
+            method = p.get("discovery_method", "llm")
+            if "regex" in method:
+                continue  # regex pairs are auto-trusted — see _regex_discover_obvious_pairs
+            early_id = p.get("early_id")
+            late_id = p.get("late_id")
+            if not early_id or not late_id:
+                continue
+            key = self._pair_key(early_id, late_id)
+            if (key in self.confirmed_pairs
+                or key in self.rejected_pairs
+                or key in self.pending_pairs):
+                continue
+            self.pending_pairs[key] = {
+                "opened_at": now,
+                "early_id": early_id,
+                "late_id": late_id,
+                "early_question": p.get("early_question", ""),
+                "llm_reason": p.get("description", ""),
+                "llm_confidence": p.get("resolution_match_confidence"),
+                "discovery_method": method,
+                "source": "pre_trade_verification",
+                "alerted": False,
+            }
+            changed = True
+        if changed:
+            self._save_json_state(self.PENDING_FILE, self.pending_pairs)
+
+    async def _write_heartbeat_snapshot(self):
+        """Writes data/status_snapshot.json with balance + stats + strategy
+        config so the dashboard can render a fresh overview every 10s
+        without re-reading the bot log.
+
+        Also registers this strategy in the shared ``strategies`` section
+        so duplicate_arb (or any future strategy) can co-exist. Failures
+        are swallowed at WARNING level — a broken heartbeat must never
+        take the bot down."""
+        try:
+            import time as _time
+            bal = await self.executor.get_balance()
+            cal_stats = {
+                "label": "Calendar",
+                "discovered": len(self.discovered_pairs),
+                "confirmed": len(self.confirmed_pairs),
+                "pending": len(self.pending_pairs),
+                "rejected": len(self.rejected_pairs),
+                "trades_entered": int(self.stats.get("trades_entered", 0)),
+                "trades_exited": int(self.stats.get("trades_exited", 0)),
+                "open_positions": len(getattr(self, "open_positions", {}) or {}),
+                "loop": int(self.stats.get("scans", 0)),
+            }
+            # Register in shared strategies section (singleton heartbeat)
+            try:
+                from core.heartbeat import MultiStrategyHeartbeat
+                MultiStrategyHeartbeat.instance().write(
+                    strategy_key="calendar_arb",
+                    balance_usd=float(bal) if bal is not None else None,
+                    stats=cal_stats,
+                )
+            except Exception:
+                pass
+
+            # Preserve the original flat format so the existing dashboard views
+            # (which read heartbeat.stats, heartbeat.pair_counts, heartbeat.strategy)
+            # keep working.
+            snapshot = self._load_json_state(os.path.join("data", "status_snapshot.json")) or {}
+            if not isinstance(snapshot, dict):
+                snapshot = {}
+            snapshot.update({
+                "balance_usd": float(bal) if bal is not None else snapshot.get("balance_usd"),
+                "updated_at": _time.time(),
+                "loop": int(self.stats.get("scans", 0)),
+                "scan_interval_s": int(self.scan_interval),
+                "stats": {
+                    "trades_entered": int(self.stats.get("trades_entered", 0)),
+                    "trades_exited": int(self.stats.get("trades_exited", 0)),
+                },
+                "open_positions": len(getattr(self, "open_positions", {}) or {}),
+                "pair_counts": {
+                    "discovered": len(self.discovered_pairs),
+                    "confirmed": len(self.confirmed_pairs),
+                    "pending": len(self.pending_pairs),
+                    "rejected": len(self.rejected_pairs),
+                },
+                "strategy": {
+                    "name": "CalendarArbitrage",
+                    "min_profit_threshold": float(self.min_profit_threshold),
+                    "early_exit_threshold": float(self.early_exit_threshold),
+                    "min_annualized_roi": float(self.min_annualized_roi),
+                    "estimated_fee": float(self.estimated_fee),
+                    "probe_usd": float(self.probe_usd),
+                    "confirmed_usd": float(self.confirmed_usd),
+                    "llm_model": str(self.llm_model) if self.use_llm else None,
+                },
+            })
+            # Preserve the "strategies" section the shared heartbeat just wrote
+            self._save_json_state(
+                os.path.join("data", "status_snapshot.json"), snapshot
+            )
+        except Exception as e:
+            self.logger.warning(f"Heartbeat snapshot failed: {e}")
 
     async def should_enter(self, opportunity: Dict[str, Any]) -> bool:
         # Basic sanity + we already used orderbook asks, so thresholds are conservative
@@ -1186,6 +1563,19 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 
                 self.stats["trades_exited"] += 1
                 self.logger.info(f"✅ Successfully exited both legs (P&L: {pnl:.4f})")
+                # Notify Telegram so the user sees capital rotations in real time
+                if self.telegram and self.telegram.enabled:
+                    try:
+                        early_q = (position.get("early_question") or "")[:60]
+                        pnl_pct = (pnl / entry_cost * 100) if entry_cost else 0.0
+                        await self.telegram.send_notice(
+                            f"💰 Early exit @ ${pnl:+.4f} ({pnl_pct:+.1f}%)\n"
+                            f"   Early: {early_q}\n"
+                            f"   Exit value ${exit_value:.4f} vs entry ${entry_cost:.4f} "
+                            f"(size={size})"
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Telegram exit notice failed: {e}")
                 return True
             else:
                 # Log failures
@@ -1212,7 +1602,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
             if state.get("alerted"):
                 continue
             opened_at = state.get("opened_at", now)
-            if now - opened_at < self.escalation_seconds:
+            # Pre-trade verification pairs bypass the 30-min grace window —
+            # they have no position yet, so we want the user to see them
+            # immediately on the next scan. Probe-then-escalate pairs still
+            # wait escalation_seconds so we don't spam at the 1-min mark.
+            is_pre_trade = state.get("source") == "pre_trade_verification"
+            if not is_pre_trade and now - opened_at < self.escalation_seconds:
                 continue
 
             early_id = state.get("early_id")
@@ -1227,15 +1622,21 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             tid_early = self._get_token_ids(early)
             tid_late = self._get_token_ids(late)
-            if len(tid_early) < 2 or len(tid_late) < 2:
+            ask_no = ask_yes = None
+            total_cost = None
+            roi = None
+            if len(tid_early) >= 2 and len(tid_late) >= 2:
+                ask_no = self._best_ask(tid_early[1])
+                ask_yes = self._best_ask(tid_late[0])
+                if ask_no and ask_yes:
+                    total_cost = ask_no["price"] + ask_yes["price"]
+                    days = self._days_until_close(late.get("endDate"))
+                    roi = self._calculate_annualized_roi(1.0 - total_cost, days)
+            # Probe-escalation needs live pricing (the whole point is "is
+            # the spread still exploitable?"). Pre-trade verification only
+            # needs identity confirmation, so send even without a book.
+            if (ask_no is None or ask_yes is None) and not is_pre_trade:
                 continue
-            ask_no = self._best_ask(tid_early[1])
-            ask_yes = self._best_ask(tid_late[0])
-            if not ask_no or not ask_yes:
-                continue
-            total_cost = ask_no["price"] + ask_yes["price"]
-            days = self._days_until_close(late.get("endDate"))
-            roi = self._calculate_annualized_roi(1.0 - total_cost, days)
 
             alert_info = {
                 "early_question": early.get("question", ""),
@@ -1244,12 +1645,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "late_desc": late.get("description", ""),
                 "early_end": early.get("endDate"),
                 "late_end": late.get("endDate"),
-                "ask_no_early": ask_no["price"],
-                "ask_yes_late": ask_yes["price"],
-                "total_cost": total_cost,
-                "annualized_roi": roi,
+                "ask_no_early": ask_no["price"] if ask_no else 0,
+                "ask_yes_late": ask_yes["price"] if ask_yes else 0,
+                "total_cost": total_cost if total_cost is not None else 0,
+                "annualized_roi": roi if roi is not None else 0,
             }
-            ok = await self.telegram.send_pair_alert(pair_key, alert_info)
+            ok = await self.telegram.send_pair_alert(pair_key, alert_info, strategy_label="Calendar")
             if ok:
                 state["alerted"] = True
                 state["alerted_at"] = now
@@ -1382,7 +1783,47 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     
                     # Log stats
                     self.logger.info(f"\n📈 Stats: {self.stats['trades_entered']} entered, {self.stats['trades_exited']} exited")
-                    
+
+                    # Heartbeat snapshot for the dashboard (balance + stats).
+                    # Dashboard reads data/status_snapshot.json for a live
+                    # balance readout — the bot itself otherwise only logs
+                    # balance just before a trade.
+                    try:
+                        import time as _time
+                        bal = await self.executor.get_balance()
+                        snapshot = {
+                            "balance_usd": float(bal) if bal is not None else None,
+                            "updated_at": _time.time(),
+                            "loop": loop_count,
+                            "scan_interval_s": int(self.scan_interval),
+                            "stats": {
+                                "trades_entered": int(self.stats.get("trades_entered", 0)),
+                                "trades_exited": int(self.stats.get("trades_exited", 0)),
+                            },
+                            "open_positions": len(self.open_positions),
+                            "pair_counts": {
+                                "discovered": len(self.discovered_pairs),
+                                "confirmed": len(self.confirmed_pairs),
+                                "pending": len(self.pending_pairs),
+                                "rejected": len(self.rejected_pairs),
+                            },
+                            "strategy": {
+                                "name": "CalendarArbitrage",
+                                "min_profit_threshold": float(self.min_profit_threshold),
+                                "early_exit_threshold": float(self.early_exit_threshold),
+                                "min_annualized_roi": float(self.min_annualized_roi),
+                                "estimated_fee": float(self.estimated_fee),
+                                "probe_usd": float(self.probe_usd),
+                                "confirmed_usd": float(self.confirmed_usd),
+                                "llm_model": str(self.llm_model) if self.use_llm else None,
+                            },
+                        }
+                        self._save_json_state(
+                            os.path.join("data", "status_snapshot.json"), snapshot
+                        )
+                    except Exception as e:
+                        self.logger.debug(f"Heartbeat snapshot failed: {e}")
+
                     # Wait for next scan
                     await asyncio.sleep(self.scan_interval)
                     

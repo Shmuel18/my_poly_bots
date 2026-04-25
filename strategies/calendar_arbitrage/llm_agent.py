@@ -20,7 +20,7 @@ class CalendarArbitrageLLMAgent:
     def __init__(
         self,
         api_key: Optional[str] = None,
-        model: str = "gemini-2.0-flash",
+        model: str = "gemini-2.5-flash-lite",
         temperature: float = 0.0,
         max_output_tokens: int = 4096,
         timeout_sec: float = 45.0,
@@ -220,7 +220,7 @@ Only include clusters where resolution_match_confidence >= 0.9. When in doubt, R
 
 _llm_agent_instance: Optional[CalendarArbitrageLLMAgent] = None
 
-def get_llm_agent(api_key: Optional[str] = None, model: str = "gemini-2.0-flash"):
+def get_llm_agent(api_key: Optional[str] = None, model: str = "gemini-2.5-flash-lite"):
     global _llm_agent_instance
     if _llm_agent_instance is None:
         try:

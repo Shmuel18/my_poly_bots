@@ -11,7 +11,7 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import ApiCreds
+from py_clob_client.clob_types import ApiCreds, BalanceAllowanceParams, AssetType
 
 # Load environment variables
 env_path = Path(__file__).parent.parent / "config" / ".env"
@@ -106,20 +106,12 @@ class PolymarketConnection:
         private_key = self._get_or_env('PRIVATE_KEY', 'POLYMARKET_PRIVATE_KEY')
         funder_address = self._get_or_env('FUNDER_ADDRESS', 'POLYMARKET_FUNDER_ADDRESS')
         
-        missing = []
-        for name, val in [('POLYMARKET_API_KEY', api_key),
-                          ('POLYMARKET_API_SECRET', api_secret),
-                          ('POLYMARKET_API_PASSPHRASE', api_passphrase),
-                          ('POLYMARKET_PRIVATE_KEY', private_key)]:
-            if not val:
-                missing.append(name)
-        
-        # FUNDER_ADDRESS נדרש רק במצב Proxy
-        # נבדוק ונדווח אם חסר כאשר נדרש
-        if missing:
+        # POLYMARKET_PRIVATE_KEY is strictly required — we derive everything else
+        # from it if the L2 creds (API_SECRET / API_PASSPHRASE) aren't provided.
+        if not private_key:
             raise EnvironmentError(
-                f"Missing required credentials: {', '.join(missing)}\n"
-                f"Provide via constructor or config/.env"
+                "Missing required credential: POLYMARKET_PRIVATE_KEY\n"
+                "Provide via constructor or config/.env"
             )
     
     def _init_client(self):
@@ -146,35 +138,52 @@ class PolymarketConnection:
             logger.info("[DEBUG] Polymarket Init: api_key=%s... api_secret=%s... api_passphrase=%s...", api_key[:6], api_secret[:6], api_passphrase[:6])
             logger.info("[DEBUG] private_key=%s... funder_address=%s", str(private_key)[:8], str(funder_address))
 
-            creds = ApiCreds(
-                api_key=api_key.strip(),
-                api_secret=api_secret.strip(),
-                api_passphrase=api_passphrase.strip()
-            )
-
             # Determine signature type dynamically
             sig_type = 1 if funder_address else 0
             logger.info(f"[DEBUG] signature_type={sig_type} (1=Proxy, 0=EOA)")
 
-            # Initialize CLOB client
+            # Initialize CLOB client. If api_secret/passphrase are missing or
+            # empty, we'll derive them from the private key after init.
             try:
                 self.client = ClobClient(
                     host=clob_url,
                     key=private_key,
                     chain_id=chain_id,
-                    creds=creds,
                     signature_type=sig_type,
-                    funder=funder_address if sig_type == 1 else None
+                    funder=funder_address if sig_type == 1 else None,
                 )
             except Exception as e:
                 logger.error(f"[DEBUG] ClobClient init failed: {e}")
                 raise
 
-            try:
-                self.client.set_api_creds(creds)
-            except Exception as e:
-                logger.error(f"[DEBUG] set_api_creds failed: {e}")
-                raise
+            # Attach API creds. Prefer explicit creds from .env; fall back to
+            # deriving them from the private key (py-clob-client signs a
+            # deterministic message to request/recover the L2 credentials).
+            creds = None
+            if api_key and api_secret and api_passphrase:
+                creds = ApiCreds(
+                    api_key=api_key.strip(),
+                    api_secret=api_secret.strip(),
+                    api_passphrase=api_passphrase.strip(),
+                )
+                try:
+                    self.client.set_api_creds(creds)
+                    logger.info("[DEBUG] Attached explicit CLOB creds from .env")
+                except Exception as e:
+                    logger.warning(f"[DEBUG] set_api_creds failed with explicit creds: {e}; will try derive")
+                    creds = None
+
+            if creds is None:
+                try:
+                    derived = self.client.create_or_derive_api_creds(nonce=0)
+                    self.client.set_api_creds(derived)
+                    logger.info(
+                        f"[DEBUG] Derived CLOB creds from private key — "
+                        f"api_key={derived.api_key}"
+                    )
+                except Exception as e:
+                    logger.error(f"[DEBUG] create_or_derive_api_creds failed: {e}")
+                    raise
 
             # Cache for balance
             self._balance_cache: Optional[float] = None
@@ -210,18 +219,31 @@ class PolymarketConnection:
             return self._balance_cache
         
         try:
-            # Try to get balance from API (preferred)
-            balance_info = self.client.get_balance_allowance()
-            balance = float(balance_info.get('balance', 0))
+            # py-clob-client 0.34+ requires a BalanceAllowanceParams object.
+            # For USDC balance, asset_type=COLLATERAL; signature_type=-1 lets
+            # the client use the one it was built with (1 for proxy accounts).
+            params = BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            balance_info = self.client.get_balance_allowance(params)
+
+            # API returns balance in USDC micro-units (6 decimals) as a string
+            raw = balance_info.get('balance', 0) if isinstance(balance_info, dict) else 0
+            try:
+                # Support both already-scaled ($123.45) and raw-wei (123450000) forms
+                raw_float = float(raw)
+                balance = raw_float / 1_000_000 if raw_float > 1_000 else raw_float
+            except (TypeError, ValueError):
+                balance = 0.0
 
             self._balance_cache = balance
             self._balance_is_real = True
-            logger.info(f"💰 Balance: ${balance:.2f} USDC")
+            logger.info(f"💰 Balance: ${balance:.2f} USDC (via CLOB)")
 
             return balance
 
         except Exception as e:
-            # If the CLOB client fails (common with Proxy/Email), fallback to RPC query
+            # If the CLOB client fails, fallback to on-chain balance query.
+            # This only shows funds sitting on the proxy — Polymarket-internal
+            # credits won't show up here.
             logger.warning(f"Could not fetch balance via CLOB client: {e}")
 
             # If we have a funder/funder address, attempt to read USDC balance directly from chain
@@ -230,7 +252,9 @@ class PolymarketConnection:
                 try:
                     import httpx
                     usdc_contract = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
-                    rpc_url = "https://polygon-rpc.com"
+                    # polygon-rpc.com started returning API_KEY_DISABLED for
+                    # cloud IPs — use drpc as a more reliable public RPC.
+                    rpc_url = "https://polygon.drpc.org"
                     payload = {
                         "jsonrpc": "2.0",
                         "method": "eth_call",

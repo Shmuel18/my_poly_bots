@@ -36,6 +36,8 @@ if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 INDEX_HTML = Path(__file__).resolve().parent / "index.html"
+LOGS_HTML = Path(__file__).resolve().parent / "logs.html"
+ENV_HTML = Path(__file__).resolve().parent / "env.html"
 
 
 def _read_json(path: Path, default):
@@ -176,43 +178,124 @@ def index():
     return HTMLResponse("<h1>Polybot Dashboard</h1><p>index.html missing.</p>")
 
 
+@app.get("/logs", response_class=HTMLResponse)
+def logs_page():
+    if LOGS_HTML.exists():
+        return HTMLResponse(LOGS_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Logs</h1><p>logs.html missing.</p>")
+
+
+@app.get("/env", response_class=HTMLResponse)
+def env_page():
+    if ENV_HTML.exists():
+        return HTMLResponse(ENV_HTML.read_text(encoding="utf-8"))
+    return HTMLResponse("<h1>Env</h1><p>env.html missing.</p>")
+
+
 @app.get("/api/status")
 def api_status():
     log = _latest_bot_log()
+    # Prefer the bot's own heartbeat snapshot (written every scan) over
+    # scraping a balance line out of the log file.
+    heartbeat = _read_json(DATA_DIR / "status_snapshot.json", {})
+    if not isinstance(heartbeat, dict):
+        heartbeat = {}
+    balance = heartbeat.get("balance_usd")
+    if balance is None:
+        balance = _parse_latest_balance(log)
     return JSONResponse({
         "server_time": int(time.time()),
         "service": _systemctl_status(SERVICE_NAME),
         "env": _env_flags(),
-        "latest_balance_usd": _parse_latest_balance(log),
+        "latest_balance_usd": balance,
+        "heartbeat": heartbeat or None,
         "log_file": str(log) if log else None,
     })
 
 
+def _pair_key(early_id: str, late_id: str) -> str:
+    """Mirror of CalendarArbitrageStrategy._pair_key so the dashboard can
+    cross-reference price snapshots without importing the strategy module."""
+    a, b = sorted((str(early_id), str(late_id)))
+    return f"{a[:12]}__{b[:12]}"
+
+
 @app.get("/api/pairs")
 def api_pairs():
-    discovered = _read_json(DATA_DIR / "discovered_pairs.json", [])
-    confirmed = _read_json(DATA_DIR / "confirmed_pairs.json", {})
-    pending = _read_json(DATA_DIR / "pending_confirmation.json", {})
-    rejected = _read_json(DATA_DIR / "rejected_pairs.json", {})
-    # Ensure lists/dicts
-    if not isinstance(discovered, list):
-        discovered = []
-    if not isinstance(confirmed, dict):
-        confirmed = {}
-    if not isinstance(pending, dict):
-        pending = {}
-    if not isinstance(rejected, dict):
-        rejected = {}
+    # ---------- Calendar arbitrage ----------
+    cal_discovered = _read_json(DATA_DIR / "discovered_pairs.json", [])
+    cal_confirmed = _read_json(DATA_DIR / "confirmed_pairs.json", {})
+    cal_pending = _read_json(DATA_DIR / "pending_confirmation.json", {})
+    cal_rejected = _read_json(DATA_DIR / "rejected_pairs.json", {})
+    cal_snap = _read_json(DATA_DIR / "price_snapshot.json", {})
+
+    if not isinstance(cal_discovered, list): cal_discovered = []
+    if not isinstance(cal_confirmed, dict): cal_confirmed = {}
+    if not isinstance(cal_pending, dict): cal_pending = {}
+    if not isinstance(cal_rejected, dict): cal_rejected = {}
+    if not isinstance(cal_snap, dict): cal_snap = {}
+
+    for p in cal_discovered:
+        key = _pair_key(p.get("early_id", ""), p.get("late_id", ""))
+        p["pair_key"] = key
+        p["strategy"] = "calendar"
+        p["strategy_label"] = "Calendar"
+        if key in cal_snap:
+            p["live"] = cal_snap[key]
+
+    # ---------- Duplicate arbitrage ----------
+    dup_discovered = _read_json(DATA_DIR / "duplicate_discovered.json", [])
+    dup_confirmed = _read_json(DATA_DIR / "duplicate_confirmed.json", {})
+    dup_pending = _read_json(DATA_DIR / "duplicate_pending.json", {})
+    dup_rejected = _read_json(DATA_DIR / "duplicate_rejected.json", {})
+    dup_snap = _read_json(DATA_DIR / "duplicate_price_snapshot.json", {})
+
+    if not isinstance(dup_discovered, list): dup_discovered = []
+    if not isinstance(dup_confirmed, dict): dup_confirmed = {}
+    if not isinstance(dup_pending, dict): dup_pending = {}
+    if not isinstance(dup_rejected, dict): dup_rejected = {}
+    if not isinstance(dup_snap, dict): dup_snap = {}
+
+    for p in dup_discovered:
+        key = p.get("pair_key") or ""
+        p["strategy"] = "duplicate"
+        p["strategy_label"] = "Duplicate"
+        if key in dup_snap:
+            p["live"] = dup_snap[key]
+
+    # ---------- Merge + tag ----------
+    def _tag(d: Dict[str, Any], strategy: str) -> Dict[str, Any]:
+        out = {}
+        for k, v in d.items():
+            if isinstance(v, dict):
+                v = {**v, "strategy": strategy}
+            out[k] = v
+        return out
+
     return JSONResponse({
-        "discovered": discovered,
-        "confirmed": confirmed,
-        "pending": pending,
-        "rejected": rejected,
+        "discovered": cal_discovered + dup_discovered,
+        "confirmed": {**_tag(cal_confirmed, "calendar"), **_tag(dup_confirmed, "duplicate")},
+        "pending":   {**_tag(cal_pending, "calendar"),   **_tag(dup_pending, "duplicate")},
+        "rejected":  {**_tag(cal_rejected, "calendar"),  **_tag(dup_rejected, "duplicate")},
         "counts": {
-            "discovered": len(discovered),
-            "confirmed": len(confirmed),
-            "pending": len(pending),
-            "rejected": len(rejected),
+            "discovered": len(cal_discovered) + len(dup_discovered),
+            "confirmed": len(cal_confirmed) + len(dup_confirmed),
+            "pending": len(cal_pending) + len(dup_pending),
+            "rejected": len(cal_rejected) + len(dup_rejected),
+        },
+        "by_strategy": {
+            "calendar": {
+                "discovered": len(cal_discovered),
+                "confirmed": len(cal_confirmed),
+                "pending": len(cal_pending),
+                "rejected": len(cal_rejected),
+            },
+            "duplicate": {
+                "discovered": len(dup_discovered),
+                "confirmed": len(dup_confirmed),
+                "pending": len(dup_pending),
+                "rejected": len(dup_rejected),
+            },
         },
     })
 
