@@ -757,7 +757,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return None
         return m
 
-    def _series_discover_pairs(self) -> int:
+    def _series_discover_pairs(self, market_map: Optional[Dict[str, Dict]] = None) -> int:
         """Ground-truth calendar-arb discovery via Polymarket's own series
         metadata.
 
@@ -779,6 +779,16 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
         Returns the count of newly-discovered pairs. Cheap to call every
         scan: an event-batch refresh + dict bucketing.
+
+        Side effect: when ``market_map`` is provided, every market we
+        extract from a series event is merged into it. The default Gamma
+        ``/markets`` list endpoint paginates by recency / volume; tail
+        markets — multi-year deadline variants in slow series like
+        ``russia-x-ukraine-ceasefire-by-2027`` — frequently fall outside
+        the top 5000 returned. Without merging them here the monitoring
+        loop's ``market_map.get(pair['early_id'])`` returns ``None`` and
+        the pair is silently skipped, leaving the dashboard stuck on
+        "Waiting for orderbook pricing…".
         """
         import time as _time
 
@@ -874,6 +884,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     continue
                 if not self._validate_temporal_containment(early_m, late_m):
                     continue
+                # Inject markets into the caller's map BEFORE the
+                # already-known check so previously-saved series pairs also
+                # get their legs price-checkable on every scan.
+                if market_map is not None:
+                    market_map.setdefault(early_m["id"], early_m)
+                    market_map.setdefault(late_m["id"], late_m)
                 pair_tuple = tuple(sorted((early_m["id"], late_m["id"])))
                 if pair_tuple in existing_pair_keys:
                     continue
@@ -901,6 +917,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         f"{early['end'].date()} → {late['end'].date()}"
                     ),
                     "early_question": early_q,
+                    "late_question": late_q,
                     "resolution_match_confidence": 1.0,
                     "discovery_method": "series",
                     "series_slug": skey,
@@ -1045,7 +1062,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # auto-confirmed without LLM or Telegram gating. Runs every scan
         # so newly-launched deadline variants enter the watch list within
         # one cycle.
-        self._series_discover_pairs()
+        # We pass market_map so series-discovered markets that fall outside
+        # the top-5000 markets-list response (multi-year deadline tails)
+        # still get price-checked by the monitoring loop below.
+        self._series_discover_pairs(market_map=market_map)
 
         # --- Regex-based Discovery (AI-free pre-pass) ---
         # Catches pairs whose titles are identical after date-stripping. Runs

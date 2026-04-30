@@ -1352,8 +1352,10 @@ function renderPairCard(p) {
   } else {
     labelA = t("leg.early");
     labelB = t("leg.late");
-    qA = localized(live, 'early_question') || localized(p, 'early_question') || "—";
-    qB = localized(live, 'late_question') || "—";
+    qA = localized(live, 'early_question') || localized(p, 'early_question') || p.early_question || "—";
+    // Fall back to the pair object — series-discovered pairs include
+    // late_question even before the monitoring loop has filled in `live`.
+    qB = localized(live, 'late_question') || localized(p, 'late_question') || p.late_question || "—";
     endA = live.early_end;
     endB = live.late_end;
   }
