@@ -689,6 +689,249 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return False
         return bool(self._MONOTONIC_DEADLINE_RE.search(question))
 
+    @staticmethod
+    def _event_series_key(event: Dict[str, Any]) -> Optional[str]:
+        """Return a stable series identifier for a Gamma event, or None.
+
+        Polymarket events expose their series in a few shapes depending on
+        the endpoint version. Try them in order:
+          1. ``series`` array (newest shape — list of ``{id, slug, title}``)
+          2. ``series`` dict (older shape — single ``{id, slug}``)
+          3. ``seriesSlug`` flat string
+          4. ``series_id`` flat int
+        Returns None when the event isn't part of any series (so it's
+        skipped by the discovery loop instead of bucketed alone).
+        """
+        series_field = event.get("series")
+        if isinstance(series_field, list) and series_field:
+            first = series_field[0]
+            if isinstance(first, dict):
+                slug = first.get("slug") or first.get("ticker")
+                if isinstance(slug, str) and slug:
+                    return slug
+                sid = first.get("id")
+                if sid is not None:
+                    return f"id:{sid}"
+        if isinstance(series_field, dict):
+            slug = series_field.get("slug") or series_field.get("ticker")
+            if isinstance(slug, str) and slug:
+                return slug
+            sid = series_field.get("id")
+            if sid is not None:
+                return f"id:{sid}"
+        slug = event.get("seriesSlug")
+        if isinstance(slug, str) and slug:
+            return slug
+        sid = event.get("series_id") or event.get("seriesId")
+        if sid is not None:
+            return f"id:{sid}"
+        return None
+
+    @staticmethod
+    def _binary_market_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract the single binary (YES/NO) market from a single-market
+        deadline-variant event, or None if the event doesn't fit that shape.
+
+        Series-based calendar arbitrage only makes sense when each event is
+        a single yes/no question with a hard deadline (e.g. "Russia x
+        Ukraine ceasefire by April 30"). Multi-outcome events (price
+        ranges, brackets, election tiers) need different handling and are
+        deferred to the LLM path.
+        """
+        markets = event.get("markets")
+        if not isinstance(markets, list) or len(markets) != 1:
+            return None
+        m = markets[0]
+        if not isinstance(m, dict):
+            return None
+        if not m.get("id"):
+            return None
+        # Reject multi-outcome markets — those need bracket logic, not calendar
+        outcomes = m.get("outcomes")
+        if isinstance(outcomes, str):
+            try:
+                outcomes = json.loads(outcomes)
+            except Exception:
+                outcomes = None
+        if isinstance(outcomes, list) and len(outcomes) != 2:
+            return None
+        return m
+
+    def _series_discover_pairs(self) -> int:
+        """Ground-truth calendar-arb discovery via Polymarket's own series
+        metadata.
+
+        Polymarket groups multi-deadline questions about the same event
+        into a single ``series`` (e.g. "Russia x Ukraine ceasefire" has
+        deadline variants by Apr 30, May 31, Jun 30, Dec 31, Jun 30 2027,
+        Dec 31 2027). When the operator wires those events into a series,
+        the resolution criteria are *guaranteed* identical apart from the
+        end date — exactly the calendar-arb monotonicity property.
+
+        This pre-pass:
+          1. Fetches active events (each carries ``series`` + ``markets``).
+          2. Groups events by series key.
+          3. For each series with ≥2 single-binary-market events, sorts
+             events by endDate and creates consecutive-pair entries.
+          4. Auto-adds them to ``confirmed_pairs`` (no LLM, no Telegram
+             gate) — Polymarket's own metadata is the strongest signal we
+             can possibly have.
+
+        Returns the count of newly-discovered pairs. Cheap to call every
+        scan: an event-batch refresh + dict bucketing.
+        """
+        import time as _time
+
+        try:
+            events = self.scanner.get_all_active_events(max_events=3000)
+        except AttributeError:
+            self.logger.warning(
+                "Scanner missing get_all_active_events; series discovery skipped."
+            )
+            return 0
+        except Exception as e:
+            self.logger.warning(f"Series discovery: event fetch failed: {e}")
+            return 0
+        if not events:
+            return 0
+
+        # Group events by series key. Only events that (a) belong to a
+        # series and (b) carry exactly one binary market participate.
+        by_series: Dict[str, List[Dict[str, Any]]] = {}
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            skey = self._event_series_key(ev)
+            if not skey:
+                continue
+            mkt = self._binary_market_from_event(ev)
+            if not mkt:
+                continue
+            # Use the event endDate first (the deadline shown to traders);
+            # fall back to the market's own endDate.
+            end_str = ev.get("endDate") or mkt.get("endDate")
+            end_dt = self._parse_end_date(end_str)
+            if end_dt is None:
+                continue
+            by_series.setdefault(skey, []).append({
+                "event": ev,
+                "market": mkt,
+                "end": end_dt,
+            })
+
+        if not by_series:
+            return 0
+
+        existing_pair_keys = {
+            tuple(sorted((p.get("early_id", ""), p.get("late_id", ""))))
+            for p in self.discovered_pairs
+        }
+
+        new_count = 0
+        now = _time.time()
+        for skey, entries in by_series.items():
+            if len(entries) < 2:
+                continue
+            entries.sort(key=lambda x: x["end"])
+            # Drop duplicates that share an end date (shouldn't normally
+            # happen inside a series but guards against operator typos).
+            uniq: List[Dict[str, Any]] = []
+            seen_ends = set()
+            for e in entries:
+                key = e["end"].isoformat()
+                if key in seen_ends:
+                    continue
+                seen_ends.add(key)
+                uniq.append(e)
+            if len(uniq) < 2:
+                continue
+
+            # Consecutive pairs only. The non-consecutive pairs (i, i+2),
+            # (i, i+3), … are implied by transitivity of the early⊂late
+            # containment, so monitoring just the (i, i+1) chain catches
+            # every spread without quadratic blowup. Larger-gap arbs that
+            # the consecutive chain can't price-check are rare and not
+            # worth the noise.
+            for i in range(len(uniq) - 1):
+                early = uniq[i]
+                late = uniq[i + 1]
+                early_m = early["market"]
+                late_m = late["market"]
+                # Reject series where the events are NOT monotonic-deadline
+                # questions. Polymarket groups several non-calendar shapes
+                # under "series": rolling 5-min crypto windows ("XRP Up or
+                # Down 11:30-11:35"), sports matchups on the same date
+                # ("KBO: Eagles vs Landers"), tournament brackets, etc.
+                # Those satisfy "shared series" but NOT "early⊂late
+                # containment" — the YES outcome of one window says
+                # nothing about the next. Requiring monotonic phrasing
+                # ("by X", "before X", "until X", "end of X") on both
+                # endpoints keeps only true calendar chains.
+                if not (
+                    self._has_monotonic_deadline(early_m.get("question", ""))
+                    and self._has_monotonic_deadline(late_m.get("question", ""))
+                ):
+                    continue
+                if not self._validate_temporal_containment(early_m, late_m):
+                    continue
+                pair_tuple = tuple(sorted((early_m["id"], late_m["id"])))
+                if pair_tuple in existing_pair_keys:
+                    continue
+                existing_pair_keys.add(pair_tuple)
+
+                early_q = (early_m.get("question")
+                           or early["event"].get("title")
+                           or "")
+                late_q = (late_m.get("question")
+                          or late["event"].get("title")
+                          or "")
+                series_title = (
+                    (early["event"].get("series") or [{}])[0].get("title")
+                    if isinstance(early["event"].get("series"), list)
+                    else (early["event"].get("series") or {}).get("title")
+                    if isinstance(early["event"].get("series"), dict)
+                    else None
+                ) or skey
+
+                self.discovered_pairs.append({
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "description": (
+                        f"Polymarket series '{series_title}': "
+                        f"{early['end'].date()} → {late['end'].date()}"
+                    ),
+                    "early_question": early_q,
+                    "resolution_match_confidence": 1.0,
+                    "discovery_method": "series",
+                    "series_slug": skey,
+                })
+
+                pair_key = self._pair_key(early_m["id"], late_m["id"])
+                self.confirmed_pairs[pair_key] = {
+                    "confirmed_at": now,
+                    "confirmed_by": "series_auto",
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "series_slug": skey,
+                    "discovery_method": "series",
+                }
+                new_count += 1
+                self.logger.info(
+                    f"🔗 Series pair: '{series_title[:50]}' "
+                    f"({early['end'].date()} ⊂ {late['end'].date()})"
+                )
+
+        if new_count > 0:
+            self._save_discovered_pairs()
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self.logger.info(
+                f"🔗 Series discovery: {new_count} new auto-confirmed "
+                f"pair(s) across {len(by_series)} series"
+            )
+        return new_count
+
     def _regex_discover_obvious_pairs(self, all_markets: List[Dict]) -> int:
         """Fast AI-free pre-pass: find pairs whose normalized title is IDENTICAL
         (after stripping temporal words). These are literally the same bet with
@@ -792,6 +1035,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
         market_map = {m['id']: m for m in all_markets}
         # Cache for _check_escalations (avoids a second scanner fetch).
         self._last_market_map = market_map
+
+        # --- Series-based Discovery (ground truth pre-pass) ---
+        # Polymarket groups multi-deadline questions for the same event into
+        # a "series" (e.g. Russia x Ukraine ceasefire by Apr 30 / May 31 /
+        # Jun 30 / Dec 31 / 2027 …). This is the strongest signal we can
+        # possibly have — the operator herself declared these markets
+        # share resolution criteria — so series-grouped pairs are
+        # auto-confirmed without LLM or Telegram gating. Runs every scan
+        # so newly-launched deadline variants enter the watch list within
+        # one cycle.
+        self._series_discover_pairs()
 
         # --- Regex-based Discovery (AI-free pre-pass) ---
         # Catches pairs whose titles are identical after date-stripping. Runs
