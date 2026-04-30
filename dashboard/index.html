@@ -972,7 +972,9 @@ const I18N = {
     "card.totalCost": "עלות כניסה",
     "card.lockedProfit": "רווח נעול",
     "card.waiting": "ממתין לתמחור מהספר…",
-    "card.noBook": "ספר ההזמנות ריק (אין נזילות כרגע)",
+    "card.noBook": "אין asks בשני הצדדים — לא ניתן להיכנס",
+    "card.earlyBookEmpty": "אין NO asks בשוק המוקדם — נסגר ככל הנראה",
+    "card.lateBookEmpty": "אין YES asks בשוק המאוחר — אין נזילות עכשיו",
     "card.closed": "השוק נסגר · אין יותר מסחר",
     "card.endsPrefix": "סיום",
     "card.daysLeft": "ימים",
@@ -1110,7 +1112,9 @@ const I18N = {
     "card.totalCost": "Entry cost",
     "card.lockedProfit": "Locked profit",
     "card.waiting": "Waiting for orderbook pricing…",
-    "card.noBook": "Order book empty (no liquidity)",
+    "card.noBook": "No asks on either leg — can't enter",
+    "card.earlyBookEmpty": "No NO asks on early leg (likely settled)",
+    "card.lateBookEmpty": "No YES asks on late leg (no liquidity now)",
     "card.closed": "Market closed · no more trading",
     "card.endsPrefix": "Ends",
     "card.daysLeft": "days left",
@@ -1332,19 +1336,29 @@ function renderPairCard(p) {
   const profitPct = live.entry_profit_pct;
   const hasPricing = totalCost != null;
 
-  // Distinguish "no live snapshot at all yet" (the bot hasn't priced this
-  // pair on any scan) from "snapshot exists but the orderbook is empty"
-  // (market closed / illiquid). The Polymarket "by April 30" markets that
-  // resolve today fall into the second bucket — the dashboard shouldn't
-  // tell the user to "wait" indefinitely when the book will never fill.
+  // Distinguish three "not priced" reasons so the user understands what's
+  // actually blocking entry, instead of a generic "no liquidity" everywhere:
+  //
+  //   1. No snapshot at all — the bot hasn't reached this pair yet.
+  //   2. Snapshot exists, market closed (days_until_close ≤ 0).
+  //   3. Snapshot exists, market still open, but only ONE leg has an ask —
+  //      the other leg's order book has dried up. We name the dead leg.
+  //   4. Both legs have empty asks — generic illiquid case.
   let placeholderText = t("card.waiting");
   let placeholderTone = "muted";
   if (live && Object.keys(live).length) {
-    // We have a snapshot but no priceable ask. Show a more specific reason.
     const days = live.days_until_close;
+    const askNoEarly = live.ask_no_early;
+    const askYesLate = live.ask_yes_late;
     if (days != null && days <= 0) {
       placeholderText = t("card.closed");
       placeholderTone = "closed";
+    } else if (askNoEarly != null && askYesLate == null) {
+      placeholderText = t("card.lateBookEmpty");
+      placeholderTone = "warn";
+    } else if (askNoEarly == null && askYesLate != null) {
+      placeholderText = t("card.earlyBookEmpty");
+      placeholderTone = "warn";
     } else {
       placeholderText = t("card.noBook");
       placeholderTone = "warn";

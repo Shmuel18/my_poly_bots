@@ -1257,11 +1257,14 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         he = self.translator.lookup(src)
                         if he:
                             snap_entry[f_he] = he
+            # Always record per-leg ask/bid status — even when one side has
+            # an empty book — so the dashboard can explain which leg is the
+            # blocker rather than saying "no liquidity" about the whole pair.
+            snap_entry["ask_no_early"] = ask_no["price"] if ask_no else None
+            snap_entry["ask_yes_late"] = ask_yes["price"] if ask_yes else None
             if ask_no and ask_yes:
                 total_cost = ask_no["price"] + ask_yes["price"]
                 snap_entry.update({
-                    "ask_no_early": ask_no["price"],
-                    "ask_yes_late": ask_yes["price"],
                     "total_cost": total_cost,
                     "entry_profit_usd": round(1.0 - total_cost, 4),
                     "entry_profit_pct": round((1.0 - total_cost) * 100, 2),
