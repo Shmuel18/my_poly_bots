@@ -398,6 +398,144 @@
   .bar-fill { height: 100%; transition: width 0.4s; }
   .bar-meta { font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-3); }
 
+  /* ============ STATUS BANNER (gradient bar above overview) ============ */
+  .status-banner {
+    background: linear-gradient(90deg, #f0fdf4 0%, #ffffff 60%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    padding: 10px 16px;
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    font-size: 12px; margin-bottom: 14px;
+  }
+  .status-banner.is-failed { background: linear-gradient(90deg, var(--red-bg) 0%, #ffffff 60%); }
+  .status-banner.is-stopped { background: linear-gradient(90deg, var(--panel-alt) 0%, #ffffff 60%); }
+  .status-banner-headline {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-weight: 700; color: var(--green-strong);
+  }
+  .status-banner.is-failed .status-banner-headline { color: var(--red-strong); }
+  .status-banner.is-stopped .status-banner-headline { color: var(--text-2); }
+  .status-banner-headline .live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+    animation: pulseDot 1.4s ease-in-out infinite;
+  }
+  .status-banner.is-failed .status-banner-headline .live-dot { background: var(--red); animation: none; }
+  .status-banner.is-stopped .status-banner-headline .live-dot { background: var(--text-3); animation: none; }
+  .status-banner-sep { color: var(--border-strong); }
+  .status-banner-meta { color: var(--text-2); }
+  .status-banner-meta .num { font-weight: 600; color: var(--text); font-family: 'JetBrains Mono', monospace; }
+  .status-banner-spacer { flex: 1; min-width: 0; }
+  .status-banner-mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* ============ HERO PnL CARD ============ */
+  .hero-row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 1100px) { .hero-row { grid-template-columns: 1fr; } }
+  .hero-pnl {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; position: relative; overflow: hidden;
+    min-height: 168px;
+  }
+  .hero-pnl-spark {
+    position: absolute; inset-inline-end: 0; bottom: 0; width: 60%; height: 100px;
+    opacity: 0.55; pointer-events: none;
+  }
+  .hero-pnl-content { position: relative; z-index: 1; }
+  .hero-pnl-eyebrow {
+    font-size: 11px; color: var(--text-3); font-weight: 700;
+    letter-spacing: 0.08em; margin-bottom: 8px; font-family: 'JetBrains Mono', monospace;
+  }
+  .hero-pnl-value {
+    font-size: 56px; font-weight: 800; letter-spacing: -0.03em; line-height: 1;
+    font-family: 'JetBrains Mono', monospace; color: var(--text);
+  }
+  .hero-pnl-value.g { color: var(--green-strong); }
+  .hero-pnl-value.r { color: var(--red-strong); }
+  .hero-pnl-meta {
+    display: flex; align-items: center; gap: 12px; margin-top: 14px;
+    font-size: 13px; color: var(--text-2); flex-wrap: wrap;
+  }
+  .hero-pnl-meta-pill {
+    font-family: 'JetBrains Mono', monospace; font-weight: 700;
+    padding: 3px 10px; border-radius: 5px;
+    background: var(--green-bg); color: var(--green-strong);
+  }
+  .hero-pnl-meta-pill.r { background: var(--red-bg); color: var(--red-strong); }
+  .hero-pnl-meta-pill.gray { background: var(--panel-alt); color: var(--text-2); }
+  .hero-pnl-meta .meta-sep { color: var(--border-strong); }
+  .hero-pnl-meta .num { font-weight: 600; color: var(--text); font-family: 'JetBrains Mono', monospace; }
+
+  /* Hero side stack: 2 stacked KPI tiles next to the hero card */
+  .hero-side { display: grid; grid-template-rows: 1fr 1fr; gap: 12px; }
+
+  /* ============ ACTIVITY FEED ============ */
+  .feed-row { display: grid; grid-template-columns: 2fr 1fr; gap: 16px; margin-top: 16px; }
+  @media (max-width: 1100px) { .feed-row { grid-template-columns: 1fr; } }
+  .activity-feed {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    display: flex; flex-direction: column; min-height: 320px;
+  }
+  .activity-feed .panel-head { font-size: 10px; }
+  .activity-feed .panel-head .mono-tag {
+    font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--text-3); letter-spacing: 0.04em;
+  }
+  .activity-feed-list { flex: 1; overflow-y: auto; max-height: 360px; }
+  .activity-row {
+    padding: 10px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px; font-size: 12px;
+  }
+  .activity-row:last-child { border-bottom: none; }
+  @keyframes feed-in { from { transform: translateY(-8px); opacity: 0; background: var(--green-bg); } to { transform: translateY(0); opacity: 1; background: transparent; } }
+  .activity-row.is-new { animation: feed-in 0.5s ease-out; }
+  .activity-time {
+    font-family: 'JetBrains Mono', monospace; color: var(--text-3);
+    font-size: 11px; min-width: 44px; flex-shrink: 0;
+  }
+  .activity-action {
+    font-size: 10px; font-weight: 700; padding: 2px 6px; border-radius: 3px;
+    min-width: 42px; text-align: center; flex-shrink: 0;
+    font-family: 'JetBrains Mono', monospace; letter-spacing: 0.04em;
+  }
+  .activity-action.scan { background: var(--blue-bg); color: var(--blue); }
+  .activity-action.discover { background: #f3e8ff; color: #7e22ce; }
+  .activity-action.confirm { background: var(--green-bg); color: var(--green-strong); }
+  .activity-action.warn { background: var(--amber-bg); color: var(--amber); }
+  .activity-action.error { background: var(--red-bg); color: var(--red-strong); }
+  .activity-action.info { background: var(--panel-alt); color: var(--text-2); }
+  .activity-text {
+    flex: 1; min-width: 0; line-height: 1.35;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--text);
+  }
+  .activity-text.muted { color: var(--text-2); }
+
+  /* ============ ENHANCED TOP BAR ============ */
+  .topbar-divider { width: 1px; height: 24px; background: var(--border); flex-shrink: 0; }
+  .bot-active-btn {
+    padding: 7px 12px; border-radius: 7px;
+    background: var(--text); color: #fff;
+    font-size: 13px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px;
+    transition: opacity 0.12s, background 0.12s;
+  }
+  .bot-active-btn:hover { opacity: 0.92; }
+  .bot-active-btn.is-failed { background: var(--red); }
+  .bot-active-btn.is-stopped { background: var(--text-3); }
+  .bot-active-btn .dot { width: 6px; height: 6px; background: var(--green); border-radius: 50%; flex-shrink: 0; }
+  .bot-active-btn.is-failed .dot { background: var(--red-bg); }
+
+  .clock-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--text-2);
+  }
+  .clock-pill .live-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block;
+    animation: pulseDot 1.4s ease-in-out infinite;
+  }
+  .clock-pill .clock-mono {
+    font-family: 'JetBrains Mono', monospace; color: var(--text-3); font-size: 11px;
+  }
+
   /* Hidden helpers */
   .hidden { display: none !important; }
   .view { display: none; }
@@ -429,7 +567,7 @@
     <div class="brand-logo">P</div>
     <div class="brand-text">
       <div class="brand-name">PolyBot</div>
-      <div class="brand-sub">botview.live</div>
+      <div class="brand-sub" id="brand-sub">botview.live</div>
     </div>
   </a>
   <div class="search">
@@ -438,11 +576,21 @@
     <span class="kbd">⌘K</span>
   </div>
   <div class="status-group">
+    <div class="clock-pill">
+      <span class="live-dot"></span>
+      <span data-i18n="topbar.connected">מחובר</span>
+      <span id="topbar-clock" class="clock-mono">--:--:--</span>
+    </div>
+    <div class="topbar-divider"></div>
     <div id="service-pill" class="service-pill">
       <span class="dot"></span>
       <span id="service-text">—</span>
       <span class="mono-sub" id="service-uptime"></span>
     </div>
+    <button id="bot-active-btn" type="button" class="bot-active-btn">
+      <span class="dot"></span>
+      <span id="bot-active-label" data-i18n="topbar.botActive">הבוט פעיל</span>
+    </button>
     <div class="lang-toggle" role="group" aria-label="Language">
       <button type="button" data-lang="he">עב</button>
       <button type="button" data-lang="en">EN</button>
@@ -525,6 +673,88 @@
 
     <!-- VIEW: OVERVIEW -->
     <section id="view-overview" class="view">
+
+      <!-- Status banner: bot health + scan cadence + next scan countdown -->
+      <div id="status-banner" class="status-banner">
+        <div class="status-banner-headline">
+          <span class="live-dot"></span>
+          <span id="status-banner-headline-text" data-i18n="banner.running">הבוט פעיל</span>
+        </div>
+        <span class="status-banner-sep">·</span>
+        <span class="status-banner-meta">
+          <span data-i18n="banner.strategies">אסטרטגיות רצות</span>
+          <span id="banner-strategies" class="num">—</span>
+        </span>
+        <span class="status-banner-sep">·</span>
+        <span class="status-banner-meta">
+          <span data-i18n="banner.scanEvery">סריקה כל</span>
+          <span id="banner-scan-interval" class="num">—</span>
+        </span>
+        <span class="status-banner-sep">·</span>
+        <span class="status-banner-meta">
+          <span data-i18n="banner.nextScan">סריקה הבאה</span>
+          <span id="banner-next-scan" class="num status-banner-mono">—</span>
+        </span>
+        <span class="status-banner-sep">·</span>
+        <span class="status-banner-meta">
+          <span data-i18n="banner.uptime">פועל</span>
+          <span id="banner-uptime" class="num">—</span>
+        </span>
+        <div class="status-banner-spacer"></div>
+        <span class="status-banner-meta">
+          <span data-i18n="banner.loop">לולאה</span>
+          <span id="banner-loop" class="num">—</span>
+        </span>
+      </div>
+
+      <!-- Hero row: balance hero card + 2 stacked KPI tiles -->
+      <div class="hero-row">
+        <div class="hero-pnl" id="hero-pnl">
+          <svg class="hero-pnl-spark" viewBox="0 0 800 100" preserveAspectRatio="none" id="hero-pnl-spark-svg" aria-hidden="true">
+            <defs>
+              <linearGradient id="heroSparkG" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="var(--green)" stop-opacity="0.25" />
+                <stop offset="100%" stop-color="var(--green)" stop-opacity="0" />
+              </linearGradient>
+            </defs>
+            <polygon id="hero-pnl-spark-area" points="" fill="url(#heroSparkG)" />
+            <polyline id="hero-pnl-spark-line" points="" fill="none" stroke="var(--green)" stroke-width="2" />
+          </svg>
+          <div class="hero-pnl-content">
+            <div class="hero-pnl-eyebrow" data-i18n="hero.eyebrow">יתרת ארנק · USDC</div>
+            <div id="hero-pnl-value" class="hero-pnl-value">$—</div>
+            <div class="hero-pnl-meta">
+              <span id="hero-pnl-pill" class="hero-pnl-meta-pill">
+                <span id="hero-pnl-pill-arrow">▲</span>
+                <span id="hero-pnl-pill-text">—</span>
+              </span>
+              <span class="meta-sep">·</span>
+              <span data-i18n="hero.confirmed">פעילים</span>
+              <span class="num" id="hero-confirmed-count">—</span>
+              <span class="meta-sep">·</span>
+              <span data-i18n="hero.pending">ממתינים</span>
+              <span class="num" id="hero-pending-count">—</span>
+              <span class="meta-sep">·</span>
+              <span data-i18n="hero.discovered">במעקב</span>
+              <span class="num" id="hero-discovered-count">—</span>
+            </div>
+          </div>
+        </div>
+        <div class="hero-side">
+          <div class="kpi">
+            <div class="kpi-label" data-i18n="kpi.pending">ממתינים</div>
+            <div id="kpi-pending" class="kpi-value a num">—</div>
+            <div class="kpi-sub" data-i18n="kpi.pending.sub">אישור ב-Telegram</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label" data-i18n="kpi.discovered">במעקב</div>
+            <div id="kpi-discovered" class="kpi-value num">—</div>
+            <div class="kpi-sub" data-i18n="kpi.discovered.sub">AI + רגקס</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Compact KPI row: balance / confirmed / opportunities / open positions -->
       <div class="kpi-row">
         <div class="kpi">
           <div class="kpi-label" data-i18n="kpi.balance">יתרת USDC</div>
@@ -537,14 +767,14 @@
           <div class="kpi-sub" data-i18n="kpi.active.sub">נסחרים אוטומטית</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label" data-i18n="kpi.pending">ממתינים</div>
-          <div id="kpi-pending" class="kpi-value a num">—</div>
-          <div class="kpi-sub" data-i18n="kpi.pending.sub">אישור ב-Telegram</div>
+          <div class="kpi-label" data-i18n="kpi.opps">הזדמנויות חיות</div>
+          <div id="kpi-opps" class="kpi-value g num">—</div>
+          <div class="kpi-sub" data-i18n="kpi.opps.sub">edge &gt; 0%</div>
         </div>
         <div class="kpi">
-          <div class="kpi-label" data-i18n="kpi.discovered">במעקב</div>
-          <div id="kpi-discovered" class="kpi-value num">—</div>
-          <div class="kpi-sub" data-i18n="kpi.discovered.sub">AI + רגקס</div>
+          <div class="kpi-label" data-i18n="kpi.open">פוזיציות פתוחות</div>
+          <div id="kpi-open" class="kpi-value num">—</div>
+          <div class="kpi-sub" data-i18n="kpi.open.sub">פוזיציות חיות</div>
         </div>
       </div>
 
@@ -575,6 +805,24 @@
         <div class="section-count" id="overview-top-count">—</div>
       </div>
       <div id="overview-top-pairs" class="pairs"></div>
+
+      <!-- Activity feed: live tail of bot's own log file -->
+      <div class="feed-row">
+        <div class="activity-feed">
+          <div class="panel-head">
+            <div class="panel-title">
+              <span data-i18n="panel.activity">פעילות חיה</span>
+              <span class="live-dot"></span>
+            </div>
+            <span class="mono-tag">STREAMING</span>
+          </div>
+          <div id="activity-feed-list" class="activity-feed-list"></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><div class="panel-title" data-i18n="panel.systemHealth">בריאות המערכת</div></div>
+          <div class="panel-body" id="system-health-body"></div>
+        </div>
+      </div>
     </section>
 
     <!-- VIEW: PAIRS -->
@@ -767,6 +1015,42 @@ const I18N = {
     "strat.status.active": "ACTIVE",
     "strat.status.stopped": "STOPPED",
     "strat.desc": "ארביטראז׳ בין שני שווקים שמתייחסים לאותו אירוע עם תאריכי סיום שונים. המאוחר זול מהמוקדם ⇒ רווח נעול.",
+    "topbar.connected": "מחובר",
+    "topbar.botActive": "הבוט פעיל",
+    "topbar.botFailed": "כשל בבוט",
+    "topbar.botStopped": "הבוט עצור",
+    "banner.running": "הבוט פעיל",
+    "banner.failed": "כשל במערכת",
+    "banner.stopped": "הבוט עצור",
+    "banner.strategies": "אסטרטגיות רצות",
+    "banner.scanEvery": "סריקה כל",
+    "banner.nextScan": "סריקה הבאה",
+    "banner.uptime": "פועל",
+    "banner.loop": "מחזור",
+    "hero.eyebrow": "יתרת ארנק · USDC",
+    "hero.confirmed": "פעילים",
+    "hero.pending": "ממתינים",
+    "hero.discovered": "במעקב",
+    "hero.streak": "רצף סריקות",
+    "kpi.opps": "הזדמנויות חיות",
+    "kpi.opps.sub": "edge > 0%",
+    "kpi.open": "פוזיציות פתוחות",
+    "kpi.open.sub": "פוזיציות חיות",
+    "panel.activity": "פעילות חיה",
+    "panel.systemHealth": "בריאות המערכת",
+    "feed.empty": "ממתין ל-loglines…",
+    "feed.scan": "SCAN",
+    "feed.discover": "DISCOVER",
+    "feed.confirm": "CONFIRM",
+    "feed.warn": "WARN",
+    "feed.error": "ERROR",
+    "feed.info": "INFO",
+    "health.cpu": "CPU",
+    "health.memory": "זיכרון",
+    "health.uptime": "Uptime",
+    "health.scan": "סריקה",
+    "health.balance": "יתרה",
+    "health.api": "API",
   },
   en: {
     "ticker.label": "LIVE · Pairs",
@@ -867,6 +1151,42 @@ const I18N = {
     "strat.status.active": "ACTIVE",
     "strat.status.stopped": "STOPPED",
     "strat.desc": "Arbitrage between two markets about the same event with different deadlines. The later market is cheaper than the earlier ⇒ locked profit.",
+    "topbar.connected": "Connected",
+    "topbar.botActive": "Bot active",
+    "topbar.botFailed": "Bot failed",
+    "topbar.botStopped": "Bot stopped",
+    "banner.running": "Bot is running",
+    "banner.failed": "System failure",
+    "banner.stopped": "Bot is stopped",
+    "banner.strategies": "strategies running",
+    "banner.scanEvery": "scan every",
+    "banner.nextScan": "next scan",
+    "banner.uptime": "uptime",
+    "banner.loop": "loop",
+    "hero.eyebrow": "Wallet balance · USDC",
+    "hero.confirmed": "active",
+    "hero.pending": "pending",
+    "hero.discovered": "tracked",
+    "hero.streak": "scan streak",
+    "kpi.opps": "Live opportunities",
+    "kpi.opps.sub": "edge > 0%",
+    "kpi.open": "Open positions",
+    "kpi.open.sub": "live positions",
+    "panel.activity": "Live activity",
+    "panel.systemHealth": "System health",
+    "feed.empty": "Awaiting log lines…",
+    "feed.scan": "SCAN",
+    "feed.discover": "DISCOVER",
+    "feed.confirm": "CONFIRM",
+    "feed.warn": "WARN",
+    "feed.error": "ERROR",
+    "feed.info": "INFO",
+    "health.cpu": "CPU",
+    "health.memory": "Memory",
+    "health.uptime": "Uptime",
+    "health.scan": "Scan",
+    "health.balance": "Balance",
+    "health.api": "API",
   },
 };
 
@@ -1078,18 +1398,32 @@ const state = {
   pairsStrategy: "all",   // "all" | "calendar" | "duplicate"
   search: "",
   positions: null,
+  logs: null,                  // raw lines from /api/logs
+  lastFeedKeys: new Set(),     // dedupe for feed-in animation
+  lastRefreshAt: null,         // ms since epoch of last successful /api/* fetch
+  balanceHistory: [],          // up to 30 recent balance samples for hero sparkline
 };
 
 /* ============ Data loading ============ */
 async function refresh() {
   try {
-    const [status, pairs, positions] = await Promise.all([
+    const [status, pairs, positions, logs] = await Promise.all([
       fetch("/api/status").then(r => r.json()),
       fetch("/api/pairs").then(r => r.json()),
       fetch("/api/positions").then(r => r.json()),
+      fetch("/api/logs?n=80").then(r => r.json()).catch(() => ({ lines: [] })),
     ]);
     state.lastData = { status, pairs };
     state.positions = positions;
+    state.logs = logs;
+    state.lastRefreshAt = Date.now();
+    // Track balance history for hero sparkline (last 30 samples)
+    const bal = status?.latest_balance_usd;
+    if (typeof bal === "number" && isFinite(bal)) {
+      const last = state.balanceHistory[state.balanceHistory.length - 1];
+      if (last !== bal) state.balanceHistory.push(bal);
+      while (state.balanceHistory.length > 30) state.balanceHistory.shift();
+    }
     // Decorate pairs with tier + search index (inline; cheap)
     decoratePairs();
     render();
@@ -1206,10 +1540,227 @@ function renderBotBreakdown() {
     </div>`).join("");
 }
 
+/* ============ Status banner (gradient bar above overview) ============ */
+function renderStatusBanner() {
+  const banner = document.getElementById("status-banner");
+  if (!banner) return;
+  const status = state.lastData?.status || {};
+  const svc = status.service || {};
+  const hb = status.heartbeat || {};
+  const strategies = hb.strategies || {};
+
+  // Banner tone follows the systemd unit status.
+  banner.classList.remove("is-failed", "is-stopped");
+  let headlineKey = "banner.running";
+  if (svc.active === "failed") {
+    banner.classList.add("is-failed");
+    headlineKey = "banner.failed";
+  } else if (svc.active && svc.active !== "active") {
+    banner.classList.add("is-stopped");
+    headlineKey = "banner.stopped";
+  }
+  document.getElementById("status-banner-headline-text").textContent = t(headlineKey);
+
+  // Active strategy count: keys present in heartbeat.strategies, or 1 if the
+  // bot reports running but didn't write strategies yet.
+  const stratCount = Object.keys(strategies).length || (svc.active === "active" ? 1 : 0);
+  document.getElementById("banner-strategies").textContent = stratCount;
+
+  // Scan interval (seconds → 30s / 1m / 1m 30s)
+  const scanS = hb.scan_interval_s;
+  document.getElementById("banner-scan-interval").textContent =
+    scanS != null ? (scanS >= 60 ? `${Math.floor(scanS/60)}m${scanS%60?` ${scanS%60}s`:""}` : `${scanS}s`) : "—";
+
+  // Next scan countdown — derived from last_scan_ts of any strategy + scan interval.
+  // last_scan_ts is in seconds; clock is JS Date. Show MM:SS.
+  let nextScanText = "—";
+  if (scanS && Object.keys(strategies).length) {
+    const last = Math.max(...Object.values(strategies).map(s => s.last_scan_ts || 0));
+    if (last > 0) {
+      const nextAt = (last + scanS) * 1000;
+      const remainingMs = Math.max(0, nextAt - Date.now());
+      const sec = Math.floor(remainingMs / 1000);
+      const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+      const ss = String(sec % 60).padStart(2, "0");
+      nextScanText = `${mm}:${ss}`;
+    }
+  }
+  document.getElementById("banner-next-scan").textContent = nextScanText;
+
+  document.getElementById("banner-uptime").textContent =
+    svc.uptime_sec != null ? fmtUptime(svc.uptime_sec) : "—";
+
+  // Loop number — pick the highest across strategies.
+  let loop = null;
+  for (const s of Object.values(strategies)) if (typeof s.loop === "number") loop = Math.max(loop || 0, s.loop);
+  document.getElementById("banner-loop").textContent = loop != null ? `#${loop}` : "—";
+}
+
+/* ============ Hero PnL (big balance number with sparkline area) ============ */
+function renderHeroPnL() {
+  const status = state.lastData?.status || {};
+  const pairs = state.lastData?.pairs?.counts || {};
+  const bal = status.latest_balance_usd;
+
+  document.getElementById("hero-pnl-value").textContent =
+    bal == null ? "$—" : `$${bal.toFixed(2)}`;
+
+  // Trend pill: compare the most recent two samples we've recorded.
+  const hist = state.balanceHistory;
+  const pillEl = document.getElementById("hero-pnl-pill");
+  const arrowEl = document.getElementById("hero-pnl-pill-arrow");
+  const textEl = document.getElementById("hero-pnl-pill-text");
+  const valueEl = document.getElementById("hero-pnl-value");
+  valueEl.classList.remove("g", "r");
+  pillEl.classList.remove("r", "gray");
+  if (hist.length >= 2) {
+    const prev = hist[hist.length - 2];
+    const cur = hist[hist.length - 1];
+    const delta = cur - prev;
+    if (Math.abs(delta) < 1e-6) {
+      pillEl.classList.add("gray");
+      arrowEl.textContent = "·";
+      textEl.textContent = "ללא שינוי";
+    } else if (delta >= 0) {
+      arrowEl.textContent = "▲";
+      textEl.textContent = `+$${delta.toFixed(2)}`;
+      valueEl.classList.add("g");
+    } else {
+      pillEl.classList.add("r");
+      arrowEl.textContent = "▼";
+      textEl.textContent = `-$${Math.abs(delta).toFixed(2)}`;
+      valueEl.classList.add("r");
+    }
+  } else {
+    pillEl.classList.add("gray");
+    arrowEl.textContent = "—";
+    textEl.textContent = "ממתין לדגימה";
+  }
+
+  document.getElementById("hero-confirmed-count").textContent = pairs.confirmed ?? "—";
+  document.getElementById("hero-pending-count").textContent = pairs.pending ?? "—";
+  document.getElementById("hero-discovered-count").textContent = pairs.discovered ?? "—";
+
+  // Render sparkline polyline + area from balanceHistory (or a flat line if <2 points).
+  const W = 800, H = 100, padTop = 8, padBottom = 4;
+  const data = hist.length >= 2 ? hist : (hist.length === 1 ? [hist[0], hist[0]] : null);
+  const lineEl = document.getElementById("hero-pnl-spark-line");
+  const areaEl = document.getElementById("hero-pnl-spark-area");
+  if (!data) {
+    lineEl.setAttribute("points", "");
+    areaEl.setAttribute("points", "");
+    return;
+  }
+  const min = Math.min(...data), max = Math.max(...data);
+  const range = max - min || 1;
+  const pts = data.map((v, i) => {
+    const x = (i / (data.length - 1)) * W;
+    const y = H - ((v - min) / range) * (H - padTop - padBottom) - padBottom;
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(" ");
+  lineEl.setAttribute("points", pts);
+  areaEl.setAttribute("points", `0,${H} ${pts} ${W},${H}`);
+
+  // Color: green if last segment up, red if down, neutral if flat.
+  const last = data[data.length - 1];
+  const prev = data[data.length - 2];
+  const sparkColor = last > prev ? "var(--green)" : last < prev ? "var(--red)" : "var(--text-3)";
+  lineEl.setAttribute("stroke", sparkColor);
+}
+
+/* ============ Activity feed (live log tail) ============ */
+const FEED_RULES = [
+  // [regex, actionLabelKey, actionClass]
+  [/🔗\s*Series pair|series_auto/i,         "feed.discover", "discover"],
+  [/🎯\s*Auto-confirmed|regex_auto/i,       "feed.confirm",  "confirm"],
+  [/✨\s*New pair|✨\s*New duplicate/i,    "feed.discover", "discover"],
+  [/✅\s*Auto-confirmed/i,                  "feed.confirm",  "confirm"],
+  [/🔍\s*Scan #|🔁\s*Duplicate Scan/i,    "feed.scan",     "scan"],
+  [/❌\s*|ERROR|Exception|Traceback/i,      "feed.error",    "error"],
+  [/⚠|WARN|warning/i,                      "feed.warn",     "warn"],
+];
+function classifyLogLine(line) {
+  for (const [re, key, cls] of FEED_RULES) if (re.test(line)) return { key, cls };
+  return { key: "feed.info", cls: "info" };
+}
+function renderActivityFeed() {
+  const host = document.getElementById("activity-feed-list");
+  if (!host) return;
+  const lines = state.logs?.lines || [];
+  if (!lines.length) {
+    host.innerHTML = `<div style="padding:24px 16px; text-align:center; color:var(--text-3); font-size:12px;">${t("feed.empty")}</div>`;
+    return;
+  }
+  // Filter to "interesting" lines only — skip bare separators / verbose spans.
+  const interesting = lines.filter(l => {
+    const s = l.trim();
+    if (!s) return false;
+    if (/^=+$/.test(s)) return false;          // banner separators
+    if (/^\s*"[^"]+":/.test(s)) return false;   // JSON quota error spillover
+    return true;
+  }).slice(-30).reverse();   // newest first
+
+  // Build HTML and animate any line we haven't seen before.
+  const newKeys = new Set();
+  const html = interesting.map(line => {
+    const m = line.match(/^(\d{4}-\d{2}-\d{2}\s+(\d{2}:\d{2}):\d{2})/);
+    const time = m ? m[2] : "--:--";
+    // Strip the timestamp + log-level prefix so the text reads cleanly.
+    const text = line.replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s*\|\s*\w+\s*\|\s*[^|]+\|\s*/, "")
+                     .replace(/^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\s*\|\s*\w+\s*\|\s*/, "");
+    const cls = classifyLogLine(line);
+    const key = `${time}|${text}`.slice(0, 200);
+    newKeys.add(key);
+    const isNew = !state.lastFeedKeys.has(key);
+    return `<div class="activity-row${isNew ? " is-new" : ""}">
+      <span class="activity-time">${escapeHtml(time)}</span>
+      <span class="activity-action ${cls.cls}">${t(cls.key)}</span>
+      <span class="activity-text">${escapeHtml(text || "—")}</span>
+    </div>`;
+  }).join("");
+  host.innerHTML = html;
+  state.lastFeedKeys = newKeys;
+}
+
+/* ============ System health side panel ============ */
+function renderSystemHealth() {
+  const host = document.getElementById("system-health-body");
+  if (!host) return;
+  const status = state.lastData?.status || {};
+  const svc = status.service || {};
+  const hb = status.heartbeat || {};
+  const env = status.env || {};
+
+  const apiKeys = Object.keys(env);
+  const apiOk = apiKeys.length ? apiKeys.filter(k => env[k]).length : 0;
+
+  const rows = [
+    { label: t("health.balance"), value: status.latest_balance_usd != null ? `$${status.latest_balance_usd.toFixed(2)}` : "—",
+      tone: "n" },
+    { label: t("health.memory"), value: svc.memory_mb != null ? `${Math.round(svc.memory_mb)} MB` : "—", tone: "n" },
+    { label: t("health.uptime"), value: svc.uptime_sec != null ? fmtUptime(svc.uptime_sec) : "—", tone: "n" },
+    { label: t("health.scan"),   value: hb.scan_interval_s != null ? `${hb.scan_interval_s}s` : "—", tone: "n" },
+    { label: t("health.api"),    value: apiKeys.length ? `${apiOk}/${apiKeys.length}` : "—",
+      tone: apiKeys.length && apiOk === apiKeys.length ? "g" : apiKeys.length ? "a" : "n" },
+  ];
+  host.innerHTML = rows.map(r => {
+    const color = r.tone === "g" ? "var(--green-strong)" : r.tone === "a" ? "var(--amber)" : "var(--text)";
+    return `
+      <div class="bar-row" style="display:flex; justify-content:space-between; align-items:center; font-size:13px; padding:6px 0; border-bottom:1px solid var(--border);">
+        <span style="color:var(--text-2)">${escapeHtml(r.label)}</span>
+        <span class="mono" style="font-weight:600; color:${color}">${escapeHtml(r.value)}</span>
+      </div>`;
+  }).join("");
+}
+
 /* ============ Views ============ */
 function renderOverview() {
+  renderStatusBanner();
+  renderHeroPnL();
   renderProfitChart();
   renderBotBreakdown();
+  renderActivityFeed();
+  renderSystemHealth();
   // Top pairs: up to 6, sorted by profit% descending, tier priority as tiebreaker
   const list = (state.lastData?.pairs?.discovered || []).slice();
   list.sort((a, b) => {
@@ -1453,6 +2004,52 @@ function renderStrategiesView() {
     </div>`;
 }
 
+/* ============ Sidebar: dynamic strategies block ============ */
+// The bot writes per-strategy stats into heartbeat.strategies. Render one
+// row per strategy (Calendar, Duplicate, …) with a status dot + count of
+// confirmed/discovered pairs. Falls back to a single "CalendarArbitrage"
+// row when the heartbeat hasn't been written yet.
+function renderSidebarStrategies() {
+  const status = state.lastData?.status || {};
+  const svc = status.service || {};
+  const hb = status.heartbeat || {};
+  const strategies = hb.strategies || {};
+  const byStrategy = state.lastData?.pairs?.by_strategy || {};
+
+  const STRAT_META = {
+    calendar_arb:  { label: "CalendarArbitrage",  short: "calendar"  },
+    duplicate_arb: { label: "DuplicateArbitrage", short: "duplicate" },
+  };
+
+  const keys = Object.keys(strategies).length ? Object.keys(strategies) : ["calendar_arb"];
+  const isUp = svc.active === "active";
+
+  const rows = keys.map(k => {
+    const meta = STRAT_META[k] || { label: k, short: k };
+    const counts = byStrategy[meta.short] || {};
+    const confirmed = counts.confirmed ?? 0;
+    const discovered = counts.discovered ?? 0;
+    return `<div class="strat-row" title="${escapeHtml(meta.label)}">
+      <span class="strat-dot ${isUp ? "" : "off"}"></span>
+      <span class="strat-name">${escapeHtml(meta.label)}</span>
+      <span class="strat-count">${confirmed}/${discovered}</span>
+    </div>`;
+  }).join("");
+
+  // The sidebar already has a static placeholder row from the original HTML
+  // (kept for first-paint). Replace its parent's contents with the rendered
+  // rows so the live data reflects every running strategy.
+  const dot = document.getElementById("strat-dot");
+  if (!dot) return;                       // first-paint guard
+  const parent = dot.closest(".nav-section");
+  if (!parent) return;
+  // Preserve the section header label if present.
+  const labelEl = parent.querySelector(".nav-label");
+  parent.innerHTML = "";
+  if (labelEl) parent.appendChild(labelEl);
+  parent.insertAdjacentHTML("beforeend", rows);
+}
+
 /* ============ Main render ============ */
 function render() {
   if (!state.lastData) return;
@@ -1471,10 +2068,28 @@ function render() {
   document.getElementById("service-uptime").textContent =
     svc.uptime_sec != null ? `· ${fmtUptime(svc.uptime_sec)}` : "";
 
+  // Bot-active button (next to the service pill)
+  const botBtn = document.getElementById("bot-active-btn");
+  if (botBtn) {
+    botBtn.classList.remove("is-failed", "is-stopped");
+    let labelKey = "topbar.botActive";
+    if (svc.active === "failed") { botBtn.classList.add("is-failed"); labelKey = "topbar.botFailed"; }
+    else if (svc.active && svc.active !== "active") { botBtn.classList.add("is-stopped"); labelKey = "topbar.botStopped"; }
+    document.getElementById("bot-active-label").textContent = t(labelKey);
+  }
+
+  // Brand sub: show loop count from heartbeat to feel "live"
+  const hb = status.heartbeat || {};
+  const strategies = hb.strategies || {};
+  const loopMax = Math.max(0, ...Object.values(strategies).map(s => s.loop || 0));
+  const brandSub = document.getElementById("brand-sub");
+  if (brandSub) {
+    brandSub.textContent = loopMax > 0 ? `botview.live · #${loopMax}` : "botview.live";
+  }
+
   // Page head
   document.getElementById("page-title").textContent = t(`page.${state.view}`);
-  document.getElementById("page-updated").textContent =
-    `${t("subtitle.updated")} · ${fmtTs(status.server_time)}`;
+  refreshPageUpdated();      // dynamic ticking; called again from the 1s timer below
 
   // Overview KPIs
   const bal = status.latest_balance_usd;
@@ -1483,6 +2098,13 @@ function render() {
   document.getElementById("kpi-pending").textContent = pairs.counts.pending;
   document.getElementById("kpi-discovered").textContent = pairs.counts.discovered;
 
+  // New compact KPI row (live opportunities + open positions)
+  const profitableCount = (pairs.discovered || []).filter(p => p.live?.entry_profit_pct > 0).length;
+  const oppEl = document.getElementById("kpi-opps");
+  if (oppEl) oppEl.textContent = profitableCount;
+  const openEl = document.getElementById("kpi-open");
+  if (openEl) openEl.textContent = state.positions?.count ?? 0;
+
   // Sidebar badges
   document.getElementById("nav-pair-count").textContent = pairs.counts.discovered;
   const posCount = state.positions?.count || 0;
@@ -1490,21 +2112,18 @@ function render() {
   posBadge.textContent = posCount || "";
   posBadge.style.display = posCount ? "" : "none";
 
-  const profitableCount = (pairs.discovered || []).filter(p => p.live?.entry_profit_pct > 0).length;
   const oppBadge = document.getElementById("nav-opp-count");
   oppBadge.textContent = profitableCount || "";
   oppBadge.style.display = profitableCount ? "" : "none";
 
-  // Sidebar strategy row
-  document.getElementById("strat-dot").classList.toggle("off", svc.active !== "active");
-  document.getElementById("strat-count").textContent = `${pairs.counts.confirmed}/${pairs.counts.discovered}`;
+  // Sidebar strategies (now dynamic per-strategy)
+  renderSidebarStrategies();
 
   // Sidebar footer
   document.getElementById("footer-mem").textContent =
     svc.memory_mb != null ? `${Math.round(svc.memory_mb)} MB` : "— MB";
   document.getElementById("footer-uptime").textContent =
     svc.uptime_sec != null ? fmtUptime(svc.uptime_sec) : "—";
-  const hb = status.heartbeat || {};
   document.getElementById("footer-scan").textContent =
     hb.scan_interval_s ? `${hb.scan_interval_s}s` : "—";
 
@@ -1520,6 +2139,28 @@ function render() {
     case "scanner":    renderScannerView();  break;
     case "strategies": renderStrategiesView();break;
   }
+}
+
+/* ============ Live "updated X seconds ago" ticker ============ */
+function refreshPageUpdated() {
+  const el = document.getElementById("page-updated");
+  if (!el) return;
+  const status = state.lastData?.status || {};
+  const ts = state.lastRefreshAt || (status.server_time ? status.server_time * 1000 : null);
+  if (!ts) { el.textContent = "—"; return; }
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (LANG === "he") {
+    el.textContent = sec < 1 ? "עודכן עכשיו" : `עודכן לפני ${sec}s`;
+  } else {
+    el.textContent = sec < 1 ? "Updated just now" : `Updated ${sec}s ago`;
+  }
+}
+function refreshLiveClock() {
+  const el = document.getElementById("topbar-clock");
+  if (!el) return;
+  const d = new Date();
+  const pad = n => String(n).padStart(2, "0");
+  el.textContent = `WSS · ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 /* ============ SPA routing ============ */
@@ -1563,6 +2204,18 @@ applyLanguage();
 readHash();
 refresh();
 setInterval(refresh, 10_000);
+// 1-second pulse: live clock + "updated Xs ago" counter + status banner
+// next-scan countdown. Cheap (just text updates) so keep the cadence tight.
+refreshLiveClock();
+setInterval(() => {
+  refreshLiveClock();
+  refreshPageUpdated();
+  if (state.view === "overview" && state.lastData) {
+    // Re-tick only the next-scan countdown so we don't repaint the whole banner
+    const banner = document.getElementById("status-banner");
+    if (banner) renderStatusBanner();
+  }
+}, 1000);
 </script>
 </body>
 </html>
