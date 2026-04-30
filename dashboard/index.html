@@ -350,6 +350,16 @@
   .meta-row { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; }
   .meta-sep { opacity: 0.5; }
   .placeholder { font-size: 13px; color: var(--text-3); font-style: italic; padding: 6px 0; }
+  .placeholder.placeholder-warn {
+    color: var(--amber); background: var(--amber-bg);
+    border-radius: 6px; padding: 8px 10px; font-style: normal;
+    border: 1px solid color-mix(in srgb, var(--amber) 25%, transparent);
+  }
+  .placeholder.placeholder-closed {
+    color: var(--text-3); background: var(--panel-alt);
+    border-radius: 6px; padding: 8px 10px; font-style: normal;
+    border: 1px dashed var(--border-strong);
+  }
 
   .empty {
     background: var(--panel); border: 1px dashed var(--border-strong);
@@ -962,6 +972,8 @@ const I18N = {
     "card.totalCost": "עלות כניסה",
     "card.lockedProfit": "רווח נעול",
     "card.waiting": "ממתין לתמחור מהספר…",
+    "card.noBook": "ספר ההזמנות ריק (אין נזילות כרגע)",
+    "card.closed": "השוק נסגר · אין יותר מסחר",
     "card.endsPrefix": "סיום",
     "card.daysLeft": "ימים",
     "card.openOnPolymarket": "פתח בפולימרקט",
@@ -1098,6 +1110,8 @@ const I18N = {
     "card.totalCost": "Entry cost",
     "card.lockedProfit": "Locked profit",
     "card.waiting": "Waiting for orderbook pricing…",
+    "card.noBook": "Order book empty (no liquidity)",
+    "card.closed": "Market closed · no more trading",
     "card.endsPrefix": "Ends",
     "card.daysLeft": "days left",
     "card.openOnPolymarket": "Open on Polymarket",
@@ -1318,7 +1332,25 @@ function renderPairCard(p) {
   const profitPct = live.entry_profit_pct;
   const hasPricing = totalCost != null;
 
-  let profitBlock = `<div class="placeholder">${t("card.waiting")}</div>`;
+  // Distinguish "no live snapshot at all yet" (the bot hasn't priced this
+  // pair on any scan) from "snapshot exists but the orderbook is empty"
+  // (market closed / illiquid). The Polymarket "by April 30" markets that
+  // resolve today fall into the second bucket — the dashboard shouldn't
+  // tell the user to "wait" indefinitely when the book will never fill.
+  let placeholderText = t("card.waiting");
+  let placeholderTone = "muted";
+  if (live && Object.keys(live).length) {
+    // We have a snapshot but no priceable ask. Show a more specific reason.
+    const days = live.days_until_close;
+    if (days != null && days <= 0) {
+      placeholderText = t("card.closed");
+      placeholderTone = "closed";
+    } else {
+      placeholderText = t("card.noBook");
+      placeholderTone = "warn";
+    }
+  }
+  let profitBlock = `<div class="placeholder placeholder-${placeholderTone}">${placeholderText}</div>`;
   if (hasPricing) {
     const profitCls = profitPct >= 0 ? "g" : "r";
     const barCls = profitPct >= 2 ? "g" : profitPct >= 0 ? "" : "r";
