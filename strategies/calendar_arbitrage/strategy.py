@@ -838,6 +838,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
         }
 
         new_count = 0
+        backfilled = False
         now = _time.time()
         for skey, entries in by_series.items():
             if len(entries) < 2:
@@ -892,6 +893,28 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     market_map.setdefault(late_m["id"], late_m)
                 pair_tuple = tuple(sorted((early_m["id"], late_m["id"])))
                 if pair_tuple in existing_pair_keys:
+                    # Self-heal: backfill late_question / series_slug onto
+                    # existing pairs that were saved before those fields
+                    # were tracked. The dashboard uses pair.late_question
+                    # as a fallback when the live snapshot is empty.
+                    existing_q = (early_m.get("question")
+                                  or early["event"].get("title") or "")
+                    late_q_now = (late_m.get("question")
+                                  or late["event"].get("title") or "")
+                    for sp in self.discovered_pairs:
+                        sp_tuple = tuple(sorted((str(sp.get("early_id", "")),
+                                                 str(sp.get("late_id", "")))))
+                        if sp_tuple != pair_tuple:
+                            continue
+                        if not sp.get("late_question") and late_q_now:
+                            sp["late_question"] = late_q_now
+                            backfilled = True
+                        if not sp.get("series_slug"):
+                            sp["series_slug"] = skey
+                            backfilled = True
+                        if not sp.get("early_question") and existing_q:
+                            sp["early_question"] = existing_q
+                            backfilled = True
                     continue
                 existing_pair_keys.add(pair_tuple)
 
@@ -947,6 +970,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 f"🔗 Series discovery: {new_count} new auto-confirmed "
                 f"pair(s) across {len(by_series)} series"
             )
+        elif backfilled:
+            # Persist backfilled late_question / series_slug onto existing
+            # entries so later restarts don't show empty leg labels again.
+            self._save_discovered_pairs()
+            self.logger.info("🔗 Series discovery: backfilled metadata on existing pairs")
         return new_count
 
     def _regex_discover_obvious_pairs(self, all_markets: List[Dict]) -> int:
