@@ -1289,8 +1289,14 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # operator has already declared share resolution criteria. Fetch
         # the events once, pass to both methods so we don't pay for the
         # HTTP call twice.
+        # max_events=10000: Polymarket reports ~10k active+open events
+        # globally, and tail-end multi-deadline chains (e.g.
+        # trump-announces-us-blockade-of-hormuz-lifted-by, 4 active
+        # markets) sit beyond offset 3000. The earlier 3000 cap was
+        # silently dropping them. The added pagination cost is ~8s per
+        # scan but the data flows through both discovery passes for free.
         try:
-            _events = self.scanner.get_all_active_events(max_events=3000)
+            _events = self.scanner.get_all_active_events(max_events=10000)
         except Exception as e:
             self.logger.warning(f"Event fetch failed (series + intra-event skipped): {e}")
             _events = []
