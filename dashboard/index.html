@@ -1719,13 +1719,14 @@ function renderHeroPnL() {
 /* ============ Activity feed (live log tail) ============ */
 const FEED_RULES = [
   // [regex, actionLabelKey, actionClass]
-  [/🔗\s*Series pair|series_auto/i,         "feed.discover", "discover"],
-  [/🎯\s*Auto-confirmed|regex_auto/i,       "feed.confirm",  "confirm"],
-  [/✨\s*New pair|✨\s*New duplicate/i,    "feed.discover", "discover"],
-  [/✅\s*Auto-confirmed/i,                  "feed.confirm",  "confirm"],
-  [/🔍\s*Scan #|🔁\s*Duplicate Scan/i,    "feed.scan",     "scan"],
-  [/❌\s*|ERROR|Exception|Traceback/i,      "feed.error",    "error"],
-  [/⚠|WARN|warning/i,                      "feed.warn",     "warn"],
+  [/🔗\s*Series pair|series_auto/i,            "feed.discover", "discover"],
+  [/🧩\s*Intra-event pair|intra_event_auto/i,  "feed.discover", "discover"],
+  [/🎯\s*Auto-confirmed|regex_auto/i,          "feed.confirm",  "confirm"],
+  [/✨\s*New pair|✨\s*New duplicate/i,        "feed.discover", "discover"],
+  [/✅\s*Auto-confirmed/i,                     "feed.confirm",  "confirm"],
+  [/🔍\s*Scan #|🔁\s*Duplicate Scan/i,        "feed.scan",     "scan"],
+  [/❌\s*|ERROR|Exception|Traceback/i,         "feed.error",    "error"],
+  [/⚠|WARN|warning/i,                         "feed.warn",     "warn"],
 ];
 function classifyLogLine(line) {
   for (const [re, key, cls] of FEED_RULES) if (re.test(line)) return { key, cls };

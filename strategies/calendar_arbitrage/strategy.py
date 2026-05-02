@@ -757,7 +757,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return None
         return m
 
-    def _series_discover_pairs(self, market_map: Optional[Dict[str, Dict]] = None) -> int:
+    def _series_discover_pairs(
+        self,
+        market_map: Optional[Dict[str, Dict]] = None,
+        events: Optional[List[Dict]] = None,
+    ) -> int:
         """Ground-truth calendar-arb discovery via Polymarket's own series
         metadata.
 
@@ -792,16 +796,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
         """
         import time as _time
 
-        try:
-            events = self.scanner.get_all_active_events(max_events=3000)
-        except AttributeError:
-            self.logger.warning(
-                "Scanner missing get_all_active_events; series discovery skipped."
-            )
-            return 0
-        except Exception as e:
-            self.logger.warning(f"Series discovery: event fetch failed: {e}")
-            return 0
+        if events is None:
+            try:
+                events = self.scanner.get_all_active_events(max_events=3000)
+            except AttributeError:
+                self.logger.warning(
+                    "Scanner missing get_all_active_events; series discovery skipped."
+                )
+                return 0
+            except Exception as e:
+                self.logger.warning(f"Series discovery: event fetch failed: {e}")
+                return 0
         if not events:
             return 0
 
@@ -977,6 +982,204 @@ class CalendarArbitrageStrategy(BaseStrategy):
             self.logger.info("🔗 Series discovery: backfilled metadata on existing pairs")
         return new_count
 
+    def _intra_event_discover_pairs(
+        self,
+        market_map: Optional[Dict[str, Dict]] = None,
+        events: Optional[List[Dict]] = None,
+    ) -> int:
+        """Calendar-arb discovery for the OTHER Polymarket multi-deadline shape.
+
+        Series discovery (``_series_discover_pairs``) handles the case where
+        each deadline variant is its own *event* sharing a series slug —
+        e.g. the Russia-x-Ukraine ceasefire has 6 separate events under
+        ``seriesSlug=russia-x-ukraine-ceasefire``.
+
+        But many calendar chains use a different shape: ONE event with N
+        markets *inside* it, each with a different endDate. Example:
+        ``trump-announces-us-blockade-of-hormuz-lifted-by`` — a single
+        event whose ``markets`` array contains 12 binary markets dated
+        Apr 23 / Apr 30 / May 8 / May 15 / May 22 / May 31 / … . The
+        event has no ``series`` field at all, so the existing series
+        method skips it; ``_binary_market_from_event`` rejects events
+        with ``len(markets) != 1``, leaving the chain entirely
+        unmonitored.
+
+        This method picks those up. It iterates every active event,
+        keeps the binary YES/NO markets that are still tradeable
+        (``closed=False``, 2 outcomes, parsable endDate), sorts them by
+        deadline, and emits consecutive ``(early, late)`` pairs the
+        same way the series method does. Side effect: every market it
+        accepts is merged into the caller's ``market_map`` so the
+        monitoring loop can price the new pairs immediately.
+
+        Auto-confirmed (``discovery_method="intra_event"``) for the same
+        reason series pairs are: the operator put these markets in one
+        event, so the resolution criteria are guaranteed identical apart
+        from the deadline.
+        """
+        import time as _time
+
+        if events is None:
+            try:
+                events = self.scanner.get_all_active_events(max_events=3000)
+            except AttributeError:
+                self.logger.warning(
+                    "Scanner missing get_all_active_events; intra-event discovery skipped."
+                )
+                return 0
+            except Exception as e:
+                self.logger.warning(f"Intra-event discovery: event fetch failed: {e}")
+                return 0
+        if not events:
+            return 0
+
+        existing_pair_keys = {
+            tuple(sorted((str(p.get("early_id", "")), str(p.get("late_id", "")))))
+            for p in self.discovered_pairs
+        }
+
+        new_count = 0
+        backfilled = False
+        events_with_chains = 0
+        now = _time.time()
+
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            markets = ev.get("markets")
+            if not isinstance(markets, list) or len(markets) < 2:
+                continue
+
+            # Keep only the legs we can actually price-check: tradeable
+            # binary YES/NO markets with a parseable endDate.
+            candidates: List[Dict[str, Any]] = []
+            for m in markets:
+                if not isinstance(m, dict) or not m.get("id"):
+                    continue
+                if m.get("closed"):
+                    continue
+                outcomes = m.get("outcomes")
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except Exception:
+                        outcomes = None
+                if not isinstance(outcomes, list) or len(outcomes) != 2:
+                    continue
+                end_dt = self._parse_end_date(m.get("endDate"))
+                if end_dt is None:
+                    continue
+                candidates.append({"market": m, "end": end_dt})
+
+            if len(candidates) < 2:
+                continue
+
+            candidates.sort(key=lambda x: x["end"])
+            # Drop markets that share an endDate (resolution race conditions
+            # produce duplicates on Polymarket sometimes).
+            uniq: List[Dict[str, Any]] = []
+            seen_ends = set()
+            for c in candidates:
+                key = c["end"].isoformat()
+                if key in seen_ends:
+                    continue
+                seen_ends.add(key)
+                uniq.append(c)
+            if len(uniq) < 2:
+                continue
+
+            event_title = (ev.get("title") or ev.get("slug") or "event")[:80]
+            event_slug = ev.get("slug") or ""
+            events_with_chains += 1
+
+            for i in range(len(uniq) - 1):
+                early_m = uniq[i]["market"]
+                late_m = uniq[i + 1]["market"]
+                # Same monotonic-deadline guard as series discovery: filters
+                # out non-calendar shapes (rolling 5-min windows, sports
+                # matchups) that happen to share an event slug.
+                if not (
+                    self._has_monotonic_deadline(early_m.get("question", ""))
+                    and self._has_monotonic_deadline(late_m.get("question", ""))
+                ):
+                    continue
+                if not self._validate_temporal_containment(early_m, late_m):
+                    continue
+                # Inject markets into the caller's map BEFORE the
+                # already-known check so previously-saved intra-event
+                # pairs also become price-checkable on every scan.
+                if market_map is not None:
+                    market_map.setdefault(early_m["id"], early_m)
+                    market_map.setdefault(late_m["id"], late_m)
+                pair_tuple = tuple(sorted((str(early_m["id"]), str(late_m["id"]))))
+                if pair_tuple in existing_pair_keys:
+                    # Self-heal old entries that pre-date the late_question
+                    # / event_slug fields (same pattern as series).
+                    early_q_now = early_m.get("question", "") or ""
+                    late_q_now = late_m.get("question", "") or ""
+                    for sp in self.discovered_pairs:
+                        sp_tuple = tuple(sorted((str(sp.get("early_id", "")),
+                                                 str(sp.get("late_id", "")))))
+                        if sp_tuple != pair_tuple:
+                            continue
+                        if not sp.get("late_question") and late_q_now:
+                            sp["late_question"] = late_q_now
+                            backfilled = True
+                        if not sp.get("event_slug") and event_slug:
+                            sp["event_slug"] = event_slug
+                            backfilled = True
+                        if not sp.get("early_question") and early_q_now:
+                            sp["early_question"] = early_q_now
+                            backfilled = True
+                    continue
+                existing_pair_keys.add(pair_tuple)
+
+                early_q = early_m.get("question", "") or ""
+                late_q = late_m.get("question", "") or ""
+
+                self.discovered_pairs.append({
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "description": (
+                        f"Polymarket event '{event_title}': "
+                        f"{uniq[i]['end'].date()} → {uniq[i + 1]['end'].date()}"
+                    ),
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "resolution_match_confidence": 1.0,
+                    "discovery_method": "intra_event",
+                    "event_slug": event_slug,
+                })
+
+                pair_key = self._pair_key(early_m["id"], late_m["id"])
+                self.confirmed_pairs[pair_key] = {
+                    "confirmed_at": now,
+                    "confirmed_by": "intra_event_auto",
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "event_slug": event_slug,
+                    "discovery_method": "intra_event",
+                }
+                new_count += 1
+                self.logger.info(
+                    f"🧩 Intra-event pair: '{event_title[:50]}' "
+                    f"({uniq[i]['end'].date()} ⊂ {uniq[i + 1]['end'].date()})"
+                )
+
+        if new_count > 0:
+            self._save_discovered_pairs()
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self.logger.info(
+                f"🧩 Intra-event discovery: {new_count} new auto-confirmed "
+                f"pair(s) across {events_with_chains} multi-market events"
+            )
+        elif backfilled:
+            self._save_discovered_pairs()
+            self.logger.info("🧩 Intra-event discovery: backfilled metadata on existing pairs")
+        return new_count
+
     def _regex_discover_obvious_pairs(self, all_markets: List[Dict]) -> int:
         """Fast AI-free pre-pass: find pairs whose normalized title is IDENTICAL
         (after stripping temporal words). These are literally the same bet with
@@ -1081,19 +1284,26 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # Cache for _check_escalations (avoids a second scanner fetch).
         self._last_market_map = market_map
 
-        # --- Series-based Discovery (ground truth pre-pass) ---
-        # Polymarket groups multi-deadline questions for the same event into
-        # a "series" (e.g. Russia x Ukraine ceasefire by Apr 30 / May 31 /
-        # Jun 30 / Dec 31 / 2027 …). This is the strongest signal we can
-        # possibly have — the operator herself declared these markets
-        # share resolution criteria — so series-grouped pairs are
-        # auto-confirmed without LLM or Telegram gating. Runs every scan
-        # so newly-launched deadline variants enter the watch list within
-        # one cycle.
-        # We pass market_map so series-discovered markets that fall outside
-        # the top-5000 markets-list response (multi-year deadline tails)
-        # still get price-checked by the monitoring loop below.
-        self._series_discover_pairs(market_map=market_map)
+        # --- Discovery from Polymarket events metadata (ground truth) ---
+        # Two complementary shapes — both are calendar arbitrage that the
+        # operator has already declared share resolution criteria. Fetch
+        # the events once, pass to both methods so we don't pay for the
+        # HTTP call twice.
+        try:
+            _events = self.scanner.get_all_active_events(max_events=3000)
+        except Exception as e:
+            self.logger.warning(f"Event fetch failed (series + intra-event skipped): {e}")
+            _events = []
+
+        # Series shape: each deadline = its own event sharing a series slug
+        # (e.g. russia-x-ukraine-ceasefire across 6 events).
+        self._series_discover_pairs(market_map=market_map, events=_events)
+
+        # Intra-event shape: ONE event with N binary markets inside, each at
+        # a different deadline (e.g. trump-announces-us-blockade-of-hormuz-
+        # lifted-by — 12 markets, no series field). Without this path the
+        # bot misses dozens of valid calendar chains.
+        self._intra_event_discover_pairs(market_map=market_map, events=_events)
 
         # --- Regex-based Discovery (AI-free pre-pass) ---
         # Catches pairs whose titles are identical after date-stripping. Runs
