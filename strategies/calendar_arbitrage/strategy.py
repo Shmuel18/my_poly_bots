@@ -566,27 +566,51 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return None, None
 
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
+        """Lowest ask in the book — the price we'd pay to BUY right now.
+
+        Polymarket's CLOB returns ``asks`` sorted by price descending
+        (worst → best). Taking ``asks[0]`` would give the WORST ask
+        ($0.99 on illiquid markets) and inflate every pair's entry cost
+        to ~$1.98, making the bot believe nothing is ever profitable.
+        We explicitly scan for the minimum price instead so we're
+        robust to API sort-order changes.
+        """
         try:
             book = self.executor.client.get_order_book(token_id)
             asks = self._orderbook_side(book, "asks")
-            if asks:
-                p, s = self._orderbook_entry(asks[0])
-                if p is not None:
-                    return {"price": p, "size": s or 0.0}
+            best_p, best_s = None, None
+            for entry in asks:
+                p, s = self._orderbook_entry(entry)
+                if p is None:
+                    continue
+                if best_p is None or p < best_p:
+                    best_p, best_s = p, s
+            if best_p is not None:
+                return {"price": best_p, "size": best_s or 0.0}
         except Exception as e:
             self.logger.debug(f"_best_ask failed for {token_id[:12]}: {e}")
             return None
         return None
 
     def _best_bid(self, token_id: str) -> Optional[Dict[str, float]]:
-        """Get best bid price (price we can sell at)."""
+        """Highest bid in the book — the price we'd get if we SELL now.
+
+        Bids come back sorted ascending (worst → best). ``bids[0]`` is
+        the LOWEST bid, useless to a seller. Take the maximum bid price
+        explicitly. Same robustness rationale as ``_best_ask``.
+        """
         try:
             book = self.executor.client.get_order_book(token_id)
             bids = self._orderbook_side(book, "bids")
-            if bids:
-                p, s = self._orderbook_entry(bids[0])
-                if p is not None:
-                    return {"price": p, "size": s or 0.0}
+            best_p, best_s = None, None
+            for entry in bids:
+                p, s = self._orderbook_entry(entry)
+                if p is None:
+                    continue
+                if best_p is None or p > best_p:
+                    best_p, best_s = p, s
+            if best_p is not None:
+                return {"price": best_p, "size": best_s or 0.0}
         except Exception as e:
             self.logger.debug(f"_best_bid failed for {token_id[:12]}: {e}")
             return None
@@ -608,13 +632,28 @@ class CalendarArbitrageStrategy(BaseStrategy):
             if not orders:
                 return None
 
+            # Polymarket returns asks sorted price DESCENDING and bids sorted
+            # price ASCENDING — i.e. worst-first in both cases. For fill
+            # simulation we want to consume from BEST first, so re-sort
+            # explicitly by what's "best" for the side we're trading:
+            #   BUY  consumes asks → ascending (lowest price first)
+            #   SELL consumes bids → descending (highest price first)
+            normalized = []
+            for o in orders:
+                p, s = self._orderbook_entry(o)
+                if p is None or s is None or s <= 0:
+                    continue
+                normalized.append((p, s))
+            if not normalized:
+                return None
+            normalized.sort(key=lambda x: x[0], reverse=(side == "SELL"))
+
             remaining_size = size
             total_cost = 0.0
             filled_size = 0.0
             first_price = None
 
-            for order in orders:
-                order_price, order_size = self._orderbook_entry(order)
+            for order_price, order_size in normalized:
                 if order_price is None or order_size is None or order_size <= 0:
                     continue
                 if first_price is None:
