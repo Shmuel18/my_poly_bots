@@ -486,12 +486,25 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return 365.0
 
     def _validate_temporal_containment(self, early: Dict, late: Dict) -> bool:
-        """Strict validation: early.endDate must be strictly earlier than late.endDate.
+        """Strict validation: early.endDate must be strictly earlier than late.endDate
+        AND early.endDate must be in the future.
 
-        This guards against false calendar-arb pairs where the LLM groups two markets
-        as same-event but their actual deadlines don't satisfy the "early ⊂ late"
-        containment property. Without this, we could buy a "guaranteed" arbitrage
-        that isn't guaranteed at all."""
+        Two failures this guards against:
+
+        1. Inverted pairs ("late" actually closes BEFORE "early"). Early⊂late
+           containment breaks and the calendar-arb math goes the other way:
+           you can hit a scenario where both legs lose simultaneously.
+
+        2. Stale-metadata pairs where the early leg's endDate already passed.
+           Polymarket recycles market IDs and sometimes leaves a market's
+           ``endDate`` field set to a past date even though the title says a
+           future deadline (e.g. "Will Russia capture Lyman by June 30, 2026?"
+           with endDate=2025-12-31). On those, the bot reads the old endDate,
+           validates against an even-later "late" market, and reports a fake
+           positive edge — but the early leg is effectively unsellable
+           (closed-but-not-closed market), so any "guaranteed +X%" is
+           illusory. Reject early_end <= now to refuse those entirely.
+        """
         early_end = self._parse_end_date(early.get("endDate"))
         late_end = self._parse_end_date(late.get("endDate"))
         if early_end is None or late_end is None:
@@ -506,6 +519,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
             )
             return False
         if early_end == late_end:
+            return False
+        # Early leg must still be tradeable. Past endDate → stale market →
+        # fake edge. We use timezone-aware UTC for the comparison since
+        # Polymarket reports endDate with explicit UTC offsets.
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        if early_end <= now_utc:
+            self.logger.debug(
+                f"Rejected pair: early endDate {early_end.isoformat()} already past "
+                f"('{early.get('question', '')[:50]}')"
+            )
             return False
         return True
     
@@ -1456,9 +1480,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
             tid_early, tid_late = self._get_token_ids(early), self._get_token_ids(late)
             if len(tid_early) < 2 or len(tid_late) < 2: continue
 
-            no_early, yes_late = tid_early[1], tid_late[0]
+            yes_early, no_early = tid_early[0], tid_early[1]
+            yes_late,  no_late  = tid_late[0], tid_late[1]
+            # The arb leg we trade: NO on early + YES on late.
             ask_no, ask_yes = self._best_ask(no_early), self._best_ask(yes_late)
             bid_no, bid_yes = self._best_bid(no_early), self._best_bid(yes_late)
+            # The OTHER side of each market — fetched so the dashboard can
+            # show full YES-bid/YES-ask/NO-bid/NO-ask for both legs (the
+            # same view Polymarket itself shows). Cheap because the
+            # orderbook is per-token and we already have the IDs.
+            ask_yes_e = self._best_ask(yes_early); bid_yes_e = self._best_bid(yes_early)
+            ask_no_l  = self._best_ask(no_late);   bid_no_l  = self._best_bid(no_late)
 
             pair_key = self._pair_key(pair['early_id'], pair['late_id'])
             days = self._days_until_close(late.get("endDate"))
@@ -1512,11 +1544,28 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         he = self.translator.lookup(src)
                         if he:
                             snap_entry[f_he] = he
-            # Always record per-leg ask/bid status — even when one side has
-            # an empty book — so the dashboard can explain which leg is the
-            # blocker rather than saying "no liquidity" about the whole pair.
-            snap_entry["ask_no_early"] = ask_no["price"] if ask_no else None
-            snap_entry["ask_yes_late"] = ask_yes["price"] if ask_yes else None
+            # Per-leg pricing for the dashboard. Show the full YES/NO
+            # ask+bid for both markets — the same view Polymarket itself
+            # exposes — so the user can see exactly what each leg looks
+            # like, not just the trade-relevant pair (NO_early + YES_late).
+            #
+            # Naming convention: ``<side>_<token>_<leg>`` where:
+            #   side  ∈ {ask, bid}     (price you'd pay / receive)
+            #   token ∈ {yes, no}      (which outcome)
+            #   leg   ∈ {early, late}  (which market)
+            #
+            # Legacy keys ``ask_no_early`` and ``ask_yes_late`` are kept
+            # so existing dashboard code that reads them still works.
+            def _price(q):
+                return q["price"] if q else None
+            snap_entry["ask_yes_early"] = _price(ask_yes_e)
+            snap_entry["bid_yes_early"] = _price(bid_yes_e)
+            snap_entry["ask_no_early"]  = _price(ask_no)
+            snap_entry["bid_no_early"]  = _price(bid_no)
+            snap_entry["ask_yes_late"]  = _price(ask_yes)
+            snap_entry["bid_yes_late"]  = _price(bid_yes)
+            snap_entry["ask_no_late"]   = _price(ask_no_l)
+            snap_entry["bid_no_late"]   = _price(bid_no_l)
             if ask_no and ask_yes:
                 total_cost = ask_no["price"] + ask_yes["price"]
                 snap_entry.update({
@@ -1529,8 +1578,6 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 })
             if bid_no and bid_yes:
                 exit_value = bid_no["price"] + bid_yes["price"]
-                snap_entry["bid_no_early"] = bid_no["price"]
-                snap_entry["bid_yes_late"] = bid_yes["price"]
                 snap_entry["exit_value"] = round(exit_value, 4)
             price_snapshot[pair_key] = snap_entry
             healthy_pair_keys.add(pair_key)

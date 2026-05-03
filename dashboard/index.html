@@ -347,6 +347,35 @@
   .progress-fill.g { background: var(--green); }
   .progress-fill.r { background: var(--red); }
 
+  /* ============ Per-leg orderbook table on pair cards ============ */
+  .leg-prices {
+    display: grid; grid-template-columns: 60px 1fr 1fr; gap: 4px 8px;
+    margin-top: 4px; font-size: 11px;
+    background: var(--panel-alt); border-radius: 6px; padding: 8px 10px;
+    border: 1px solid var(--border);
+  }
+  .leg-prices .lph {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px;
+    color: var(--text-3); font-weight: 700; letter-spacing: 0.05em;
+    text-transform: uppercase; align-self: center;
+  }
+  .leg-prices .lp-leg-label {
+    font-size: 10px; color: var(--text-3); font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.04em;
+    align-self: center;
+  }
+  .lp-cell {
+    display: flex; gap: 4px; align-items: baseline;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  }
+  .lp-cell .side {
+    font-size: 9px; color: var(--text-3); font-weight: 600;
+    width: 18px; text-align: end;
+  }
+  .lp-cell .ask { color: var(--red-strong); font-weight: 600; }
+  .lp-cell .bid { color: var(--green-strong); font-weight: 600; }
+  .lp-cell .none { color: var(--text-3); font-weight: 500; }
+
   .meta-row { display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; color: var(--text-3); font-family: 'JetBrains Mono', monospace; }
   .meta-sep { opacity: 0.5; }
   .placeholder { font-size: 13px; color: var(--text-3); font-style: italic; padding: 6px 0; }
@@ -1369,6 +1398,47 @@ function colorFromKey(key) {
   return palette[Math.abs(h) % palette.length];
 }
 
+/* ============ Per-leg price table (orderbook view on each card) ============ */
+function _fmtCent(price) {
+  if (price == null) return `<span class="none">—</span>`;
+  return `${(price * 100).toFixed(1)}¢`;
+}
+function renderLegPrices(live, labelA, labelB) {
+  if (!live || !Object.keys(live).length) return "";
+  // For calendar pairs we store ask/bid for both YES and NO on both legs.
+  // For duplicate pairs the schema is different — skip the table.
+  const hasCalShape =
+    "ask_yes_early" in live || "ask_no_early" in live ||
+    "ask_yes_late"  in live || "ask_no_late"  in live;
+  if (!hasCalShape) return "";
+
+  const cell = (ask, bid) => `
+    <div class="lp-cell">
+      <span class="side">ask</span><span class="ask">${_fmtCent(ask)}</span>
+      <span class="side">bid</span><span class="bid">${_fmtCent(bid)}</span>
+    </div>`;
+
+  // ⬇️ marks the side calendar arb actually trades (NO on early, YES on late).
+  return `
+    <div class="leg-prices" title="orderbook by leg/side · ¢ = cents per share">
+      <span class="lph"></span>
+      <span class="lph" style="text-align:start">YES</span>
+      <span class="lph" style="text-align:start">NO</span>
+      <span class="lp-leg-label">${escapeHtml(labelA)}</span>
+      ${cell(live.ask_yes_early, live.bid_yes_early)}
+      <div class="lp-cell" style="background:rgba(220,38,38,0.06); border-radius:4px; padding:2px 6px;">
+        <span class="side">ask</span><span class="ask">${_fmtCent(live.ask_no_early)}</span>
+        <span class="side">bid</span><span class="bid">${_fmtCent(live.bid_no_early)}</span>
+      </div>
+      <span class="lp-leg-label">${escapeHtml(labelB)}</span>
+      <div class="lp-cell" style="background:rgba(14,159,110,0.07); border-radius:4px; padding:2px 6px;">
+        <span class="side">ask</span><span class="ask">${_fmtCent(live.ask_yes_late)}</span>
+        <span class="side">bid</span><span class="bid">${_fmtCent(live.bid_yes_late)}</span>
+      </div>
+      ${cell(live.ask_no_late, live.bid_no_late)}
+    </div>`;
+}
+
 /* ============ Pair card (reused across views) ============ */
 function renderPairCard(p) {
   const live = p.live || {};
@@ -1468,6 +1538,7 @@ function renderPairCard(p) {
           <span class="leg-q" title="${escapeHtml(localized(live, 'late_desc') || '')}">${escapeHtml(qB)}${isDup ? "" : legLink(live.late_event_slug, live.late_slug)}</span>
         </div>
       </div>
+      ${renderLegPrices(live, labelA, labelB)}
       <div class="divider"></div>
       ${profitBlock}
       <div class="meta-row">
