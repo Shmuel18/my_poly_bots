@@ -1691,8 +1691,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     "pending": len(self.pending_pairs),
                     "rejected": len(self.rejected_pairs),
                 },
+                "dry_run": bool(getattr(self, "dry_run", False)),
                 "strategy": {
                     "name": "CalendarArbitrage",
+                    "dry_run": bool(getattr(self, "dry_run", False)),
                     "min_profit_threshold": float(self.min_profit_threshold),
                     "early_exit_threshold": float(self.early_exit_threshold),
                     "min_annualized_roi": float(self.min_annualized_roi),
