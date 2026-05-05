@@ -472,6 +472,113 @@ class CalendarArbitrageStrategy(BaseStrategy):
         except Exception:
             return None
 
+    # Months → number, used by the question-title date parser below.
+    _MONTH_LOOKUP = {m: i + 1 for i, m in enumerate(MONTH_WORDS)}
+
+    # Capture group 1: "by"|"before"|"until"|"prior to"|"no later than"|"end of"
+    # Group 2: optional "the", group 3: optional "end of "
+    # Group 4 = month name OR full numeric date OR bare year.
+    # We compile a non-greedy version that surfaces both the month/day/year
+    # parts; the calling helper does the actual interpretation.
+    _RESOLUTION_DATE_RE = re.compile(
+        r"\b(?:by|until|before|prior\s+to|no\s+later\s+than|end\s+of)\s+"
+        r"(?:the\s+)?(?:end\s+of\s+)?"
+        r"("
+        + r"|".join(MONTH_WORDS) +
+        r")(?:\s+(\d{1,2}))?(?:[,]?\s+(\d{4}))?"           # month [day] [year]
+        r"|\b(?:by|until|before|prior\s+to|no\s+later\s+than|end\s+of)\s+"
+        r"(?:the\s+)?(?:end\s+of\s+)?"
+        r"(\d{4})\b",                                        # bare year
+        re.IGNORECASE,
+    )
+
+    def _resolution_date_from_question(self, question: Optional[str], reference: Optional[Any] = None):
+        """Extract the deadline a market actually resolves on from its title.
+
+        Polymarket's ``endDate`` field is when *trading* closes, which is
+        not always the same as when the question resolves. Recycled
+        markets can carry an ``endDate`` weeks after the resolution
+        criterion (e.g. "Iran closes airspace by May 8" with
+        ``endDate=May 31``). Sorting / containment by ``endDate``
+        therefore inverts pairs and produces fake edges. The title is
+        the source of truth: it always names the resolution date.
+
+        Returns a timezone-aware datetime (UTC, end of day) or None when
+        no parseable deadline is in the question.
+
+        ``reference`` is an optional anchor datetime used to disambiguate
+        bare month phrases like "by April 30?" — without a year, we
+        assume the next occurrence on or after the reference (default
+        now()). Calendar arb needs the FUTURE instance, never the past.
+        """
+        if not question or not isinstance(question, str):
+            return None
+        from datetime import datetime, timezone
+        m = self._RESOLUTION_DATE_RE.search(question.lower())
+        if not m:
+            return None
+        month_name, day_str, year_str, bare_year = m.groups()
+
+        # Bare year ("by 2027" / "before 2026") → Dec 31 of that year
+        if bare_year:
+            try:
+                return datetime(int(bare_year), 12, 31, 23, 59, tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return None
+
+        if not month_name:
+            return None
+        month = self._MONTH_LOOKUP.get(month_name.lower())
+        if not month:
+            return None
+        ref = reference or datetime.now(timezone.utc)
+        try:
+            day = int(day_str) if day_str else None
+        except (ValueError, TypeError):
+            day = None
+        # Pick year: explicit year wins; otherwise infer from the
+        # reference. If the resulting date would already be past, bump
+        # to next year (since "by April 30" in May means NEXT April).
+        if year_str:
+            try:
+                year = int(year_str)
+            except (ValueError, TypeError):
+                year = ref.year
+        else:
+            year = ref.year
+        # If no day provided, use last day of month — calendar arb
+        # treats "by April" as "by end of April".
+        if day is None:
+            from calendar import monthrange
+            day = monthrange(year, month)[1]
+        try:
+            cand = datetime(year, month, day, 23, 59, tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+        if not year_str and cand <= ref:
+            try:
+                cand = datetime(year + 1, month, day, 23, 59, tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return None
+        return cand
+
+    def _market_resolution_date(self, market: Optional[Dict[str, Any]]):
+        """Best-effort resolution date for a market: parse the question
+        title first; fall back to the ``endDate`` field if the title
+        doesn't carry a parseable deadline. Returns a tz-aware datetime
+        or None."""
+        if not market:
+            return None
+        # Anchor relative phrases ("by April") to the market's endDate
+        # if present so we pick the same year-instance Polymarket did.
+        anchor = self._parse_end_date(market.get("endDate"))
+        from_title = self._resolution_date_from_question(
+            market.get("question"), reference=anchor
+        )
+        if from_title is not None:
+            return from_title
+        return anchor
+
     def _days_until_close(self, end_date_str: Optional[str]) -> float:
         """חישוב ימים עד סגירת השוק."""
         end_date = self._parse_end_date(end_date_str)
@@ -505,11 +612,18 @@ class CalendarArbitrageStrategy(BaseStrategy):
            (closed-but-not-closed market), so any "guaranteed +X%" is
            illusory. Reject early_end <= now to refuse those entirely.
         """
-        early_end = self._parse_end_date(early.get("endDate"))
-        late_end = self._parse_end_date(late.get("endDate"))
+        # Use the resolution date parsed from each market's question title
+        # rather than the ``endDate`` field. ``endDate`` is when trading
+        # closes — sometimes weeks after the question's actual deadline
+        # — and was producing inverted pairs (e.g. "by May 8" market
+        # had endDate May 31, sorting it AFTER "by May 15"). The title
+        # is the source of truth for resolution timing.
+        early_end = self._market_resolution_date(early)
+        late_end = self._market_resolution_date(late)
         if early_end is None or late_end is None:
             self.logger.debug(
-                f"Rejected pair: missing endDate (early={early.get('endDate')}, late={late.get('endDate')})"
+                f"Rejected pair: missing resolution date (early='{(early.get('question') or '')[:40]}', "
+                f"late='{(late.get('question') or '')[:40]}')"
             )
             return False
         if early_end > late_end:
@@ -520,9 +634,8 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return False
         if early_end == late_end:
             return False
-        # Early leg must still be tradeable. Past endDate → stale market →
-        # fake edge. We use timezone-aware UTC for the comparison since
-        # Polymarket reports endDate with explicit UTC offsets.
+        # Early leg must still be tradeable. Past resolution → stale
+        # market → fake edge.
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
         if early_end <= now_utc:
@@ -885,10 +998,14 @@ class CalendarArbitrageStrategy(BaseStrategy):
             mkt = self._binary_market_from_event(ev)
             if not mkt:
                 continue
-            # Use the event endDate first (the deadline shown to traders);
-            # fall back to the market's own endDate.
-            end_str = ev.get("endDate") or mkt.get("endDate")
-            end_dt = self._parse_end_date(end_str)
+            # Prefer the resolution date parsed from the market's title.
+            # ``endDate`` (event or market) is when trading closes, which
+            # can be weeks after the actual resolution criterion on
+            # recycled Polymarket markets. The title is authoritative.
+            end_dt = self._market_resolution_date(mkt)
+            if end_dt is None:
+                # Fallback: try the event's own endDate as a last resort.
+                end_dt = self._parse_end_date(ev.get("endDate"))
             if end_dt is None:
                 continue
             by_series.setdefault(skey, []).append({
@@ -1129,7 +1246,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         outcomes = None
                 if not isinstance(outcomes, list) or len(outcomes) != 2:
                     continue
-                end_dt = self._parse_end_date(m.get("endDate"))
+                # Prefer the resolution date parsed from the question
+                # title; fall back to endDate when the title has no
+                # deadline phrase. This sorts pairs by when each market
+                # actually RESOLVES, not when trading closes — which
+                # are different on recycled Polymarket markets.
+                end_dt = self._market_resolution_date(m)
                 if end_dt is None:
                     continue
                 candidates.append({"market": m, "end": end_dt})

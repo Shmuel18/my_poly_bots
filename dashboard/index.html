@@ -1326,11 +1326,14 @@ const fmtDate = iso => {
 };
 const clampPct = x => Math.max(0, Math.min(100, x || 0));
 
-/* Polymarket canonical URL from the event slug (preferred) or market slug. */
-function pmUrl(eventSlug, marketSlug) {
-  const s = eventSlug || marketSlug;
-  if (!s || typeof s !== "string") return null;
-  return `https://polymarket.com/event/${encodeURIComponent(s)}`;
+/* Polymarket canonical URL — only the EVENT slug works under /event/.
+   The per-market slug (e.g. "bitcoin-all-time-high-by-june-30-2026")
+   returns 404 there. We previously fell back to it when event_slug
+   was missing, which produced broken links. Now: no link if no
+   event slug, period. */
+function pmUrl(eventSlug, _marketSlugIgnored) {
+  if (!eventSlug || typeof eventSlug !== "string") return null;
+  return `https://polymarket.com/event/${encodeURIComponent(eventSlug)}`;
 }
 function legLink(eventSlug, marketSlug) {
   const url = pmUrl(eventSlug, marketSlug);
