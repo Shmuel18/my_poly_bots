@@ -1254,6 +1254,15 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 end_dt = self._market_resolution_date(m)
                 if end_dt is None:
                     continue
+                # Inject the parent event's slug into the market dict so
+                # downstream _event_slug() and the dashboard's "Open on
+                # Polymarket" link both find it. Markets fetched via
+                # /events nested-children don't carry an ``events`` array,
+                # so without this the per-leg link would be missing.
+                ev_slug = ev.get("slug") or ""
+                ev_id = ev.get("id")
+                if ev_slug and not m.get("events"):
+                    m["events"] = [{"slug": ev_slug, "id": ev_id}]
                 candidates.append({"market": m, "end": end_dt})
 
             if len(candidates) < 2:
@@ -1458,7 +1467,69 @@ class CalendarArbitrageStrategy(BaseStrategy):
             self.logger.info(f"📐 Regex discovery: {new_count} new auto-confirmed pair(s)")
         return new_count
 
+    def _purge_pairs_with_invalid_titles(self) -> int:
+        """Drop saved pairs whose question titles parse as inverted or past.
+
+        Older code added pairs based on Polymarket's ``endDate`` field even
+        when the resolution criterion parsed from the title was different
+        (e.g. "by May 8" market with endDate=May 31 → mis-sorted ahead of
+        "by May 15"). After upgrading the parser, we want those bad
+        entries gone NOW, not in 5 missing-scan cycles.
+
+        Title-only check — no API calls, no orderbook fetches. Drops a
+        pair when:
+          - both titles parse to a resolution date AND early >= late
+          - early's parsed date is already past
+        Pairs without a parseable deadline (rare — "before his term
+        ends") are LEFT alone; they fall back to the existing missing-
+        scans purge path.
+        """
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        kept: List[Dict[str, Any]] = []
+        dropped: List[Dict[str, Any]] = []
+        for p in self.discovered_pairs:
+            eq = p.get("early_question") or ""
+            lq = p.get("late_question") or ""
+            e_res = self._resolution_date_from_question(eq)
+            l_res = self._resolution_date_from_question(lq)
+            # Keep pairs we can't fully parse — let the slow path handle them
+            if e_res is None or l_res is None:
+                kept.append(p); continue
+            if e_res >= l_res or e_res <= now_utc:
+                dropped.append(p)
+            else:
+                kept.append(p)
+        if not dropped:
+            return 0
+        self.discovered_pairs = kept
+        # Also remove from confirmed/pending/rejected so the dashboard
+        # stops showing ghost cards for them.
+        dropped_keys = {self._pair_key(p["early_id"], p["late_id"]) for p in dropped}
+        self.confirmed_pairs = {k: v for k, v in self.confirmed_pairs.items() if k not in dropped_keys}
+        self.pending_pairs   = {k: v for k, v in self.pending_pairs.items()   if k not in dropped_keys}
+        self.rejected_pairs  = {k: v for k, v in self.rejected_pairs.items()  if k not in dropped_keys}
+        self._save_discovered_pairs()
+        self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+        self._save_json_state(self.PENDING_FILE,   self.pending_pairs)
+        self._save_json_state(self.REJECTED_FILE,  self.rejected_pairs)
+        sample = ", ".join((p.get("early_question") or "")[:40] for p in dropped[:3])
+        self.logger.info(
+            f"🧹 Purged {len(dropped)} pair(s) with inverted/past titles. Sample: {sample}"
+        )
+        return len(dropped)
+
     async def scan(self) -> List[Dict[str, Any]]:
+        # Fast pre-flight: drop any saved pair whose question titles already
+        # parse as inverted (early resolution > late) or past. These were
+        # added by older code that trusted Polymarket's endDate field even
+        # when the resolution criterion (parsed from the title) was
+        # different. Without this immediate purge they'd persist for 5
+        # missing-scan cycles before _cleanup_expired_pairs caught them
+        # — meanwhile producing fake +X% locked-profit cards. Title-only
+        # check, no orderbook fetches, runs in microseconds.
+        self._purge_pairs_with_invalid_titles()
+
         all_markets = self.scanner.get_all_active_markets(max_markets=5000)
         if not all_markets:
             return []
