@@ -642,6 +642,22 @@ class CalendarArbitrageStrategy(BaseStrategy):
         # market → fake edge.
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
+        # Also reject pairs whose markets have an endDate already past.
+        # When Polymarket's endDate is in the past, the market is either
+        # being finalized for resolution (orderbook frozen) or the operator
+        # forgot to update it. Either way the orderbook quotes are stale
+        # and any reported edge is illusory. The Hormuz "by end of April"
+        # market with endDate=2026-04-30 (already past) demonstrates this:
+        # NO bid 99.9¢ but no ask, YES ask 0.1¢ but no bid → essentially
+        # settled as NO, not actually tradeable.
+        for label, mkt in (("early", early), ("late", late)):
+            mkt_end = self._parse_end_date(mkt.get("endDate"))
+            if mkt_end is not None and mkt_end <= now_utc:
+                self.logger.debug(
+                    f"Rejected pair: {label} market endDate {mkt_end.isoformat()} "
+                    f"already past ('{mkt.get('question', '')[:50]}')"
+                )
+                return False
         if early_end <= now_utc:
             self.logger.debug(
                 f"Rejected pair: early endDate {early_end.isoformat()} already past "
@@ -1506,6 +1522,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
         for p in self.discovered_pairs:
             eq = p.get("early_question") or ""
             lq = p.get("late_question") or ""
+            method = p.get("discovery_method")
+            # Drop legacy artifacts: pairs with no late_question saved AND
+            # no discovery_method are leftover entries from the original LLM
+            # clustering pass (e.g. "Billionaire wealth tax on California
+            # ballot" matched against "passes in California election 2026"
+            # — different RESOLUTION criteria, not just different deadlines,
+            # so calendar-arb math doesn't apply). Once these legacy "?"
+            # pairs are removed they won't be re-discovered by the strict
+            # series/intra_event/regex paths.
+            if not lq and not method:
+                dropped.append(p); continue
             e_res = self._resolution_date_from_question(eq)
             l_res = self._resolution_date_from_question(lq)
             # Keep pairs we can't fully parse — let the slow path handle them
