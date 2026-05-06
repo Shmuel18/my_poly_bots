@@ -1517,6 +1517,19 @@ class CalendarArbitrageStrategy(BaseStrategy):
         """
         from datetime import datetime, timezone
         now_utc = datetime.now(timezone.utc)
+        # Pull raw endDates from the price snapshot — they're stored
+        # there per pair when the monitoring loop builds an entry. Using
+        # this to cross-check stale-but-still-active markets like the
+        # Hormuz "by end of April" leg that has endDate=2026-04-30 even
+        # though the title parses (after year-bump) to 2027-04-30.
+        snap = {}
+        try:
+            import os
+            if os.path.exists(self.PRICE_SNAPSHOT_FILE):
+                with open(self.PRICE_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                    snap = json.load(f) or {}
+        except Exception:
+            snap = {}
         kept: List[Dict[str, Any]] = []
         dropped: List[Dict[str, Any]] = []
         for p in self.discovered_pairs:
@@ -1532,6 +1545,22 @@ class CalendarArbitrageStrategy(BaseStrategy):
             # pairs are removed they won't be re-discovered by the strict
             # series/intra_event/regex paths.
             if not lq and not method:
+                dropped.append(p); continue
+            # Snapshot-anchored stale check: if either leg's raw endDate
+            # is already past, the market is being finalized (or worse,
+            # forgotten by Polymarket) and its orderbook quotes are
+            # untrustworthy. Drop the pair.
+            pair_key = self._pair_key(p.get("early_id", ""), p.get("late_id", ""))
+            s = snap.get(pair_key) or {}
+            stale = False
+            for fld in ("early_end", "late_end"):
+                v = s.get(fld)
+                if not v: continue
+                d = self._parse_end_date(v)
+                if d is not None and d <= now_utc:
+                    stale = True
+                    break
+            if stale:
                 dropped.append(p); continue
             e_res = self._resolution_date_from_question(eq)
             l_res = self._resolution_date_from_question(lq)
