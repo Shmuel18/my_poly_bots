@@ -1590,6 +1590,53 @@ class CalendarArbitrageStrategy(BaseStrategy):
         )
         return len(dropped)
 
+    def _purge_pairs_with_stale_markets(self, market_map: Dict[str, Dict]) -> int:
+        """Purge saved pairs whose live market endDate is already past.
+
+        Complements the title-based purge: that runs before market fetch
+        and catches pairs by their saved questions, but it can't see
+        Polymarket's actual ``endDate`` when the snapshot for the pair
+        hasn't been built yet (e.g. a brand-new pair the monitoring
+        loop just rejected on validation). This pass runs AFTER market
+        fetch — using the live ``market_map`` — so any stale-market
+        pair is dropped on the same scan instead of waiting 5 missing-
+        scan cycles via _cleanup_expired_pairs.
+        """
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        kept: List[Dict[str, Any]] = []
+        dropped: List[Dict[str, Any]] = []
+        for p in self.discovered_pairs:
+            early = market_map.get(p.get("early_id"))
+            late  = market_map.get(p.get("late_id"))
+            stale = False
+            for m in (early, late):
+                if not m: continue
+                d = self._parse_end_date(m.get("endDate"))
+                if d is not None and d <= now_utc:
+                    stale = True
+                    break
+            if stale:
+                dropped.append(p)
+            else:
+                kept.append(p)
+        if not dropped:
+            return 0
+        self.discovered_pairs = kept
+        dropped_keys = {self._pair_key(p["early_id"], p["late_id"]) for p in dropped}
+        self.confirmed_pairs = {k: v for k, v in self.confirmed_pairs.items() if k not in dropped_keys}
+        self.pending_pairs   = {k: v for k, v in self.pending_pairs.items()   if k not in dropped_keys}
+        self.rejected_pairs  = {k: v for k, v in self.rejected_pairs.items()  if k not in dropped_keys}
+        self._save_discovered_pairs()
+        self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+        self._save_json_state(self.PENDING_FILE,   self.pending_pairs)
+        self._save_json_state(self.REJECTED_FILE,  self.rejected_pairs)
+        sample = ", ".join((p.get("early_question") or "")[:40] for p in dropped[:3])
+        self.logger.info(
+            f"🧹 Purged {len(dropped)} pair(s) with stale market endDates. Sample: {sample}"
+        )
+        return len(dropped)
+
     async def scan(self) -> List[Dict[str, Any]]:
         # Fast pre-flight: drop any saved pair whose question titles already
         # parse as inverted (early resolution > late) or past. These were
@@ -1610,6 +1657,14 @@ class CalendarArbitrageStrategy(BaseStrategy):
         market_map = {m['id']: m for m in all_markets}
         # Cache for _check_escalations (avoids a second scanner fetch).
         self._last_market_map = market_map
+
+        # Second purge pass — uses live market_map endDate to drop pairs
+        # with markets whose Polymarket endDate is already past, even if
+        # the title parser bumped the year (e.g. Hormuz "by end of April"
+        # whose title parses to 2027 but whose Polymarket endDate is
+        # 2026-04-30 already past). The title-only purge above couldn't
+        # see this; here we have the live truth.
+        self._purge_pairs_with_stale_markets(market_map)
 
         # --- Discovery from Polymarket events metadata (ground truth) ---
         # Two complementary shapes — both are calendar arbitrage that the
