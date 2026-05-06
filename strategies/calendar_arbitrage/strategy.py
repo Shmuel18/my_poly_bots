@@ -566,18 +566,22 @@ class CalendarArbitrageStrategy(BaseStrategy):
         """Best-effort resolution date for a market: parse the question
         title first; fall back to the ``endDate`` field if the title
         doesn't carry a parseable deadline. Returns a tz-aware datetime
-        or None."""
+        or None.
+
+        Anchors year-disambiguation to ``now()``, never to the market's
+        endDate. Polymarket recycles markets with stale endDate fields
+        (e.g. a "by May 6" market shown today as endDate=May 31), and
+        anchoring to that endDate would make the parser bump "by May 6"
+        to NEXT year (because May 6 is before the May 31 anchor) —
+        producing an inverted pair against the sibling "by May 31"
+        market. Using ``now`` keeps the future-most-instance semantics
+        without trusting a possibly-stale field."""
         if not market:
             return None
-        # Anchor relative phrases ("by April") to the market's endDate
-        # if present so we pick the same year-instance Polymarket did.
-        anchor = self._parse_end_date(market.get("endDate"))
-        from_title = self._resolution_date_from_question(
-            market.get("question"), reference=anchor
-        )
+        from_title = self._resolution_date_from_question(market.get("question"))
         if from_title is not None:
             return from_title
-        return anchor
+        return self._parse_end_date(market.get("endDate"))
 
     def _days_until_close(self, end_date_str: Optional[str]) -> float:
         """חישוב ימים עד סגירת השוק."""
@@ -1415,10 +1419,16 @@ class CalendarArbitrageStrategy(BaseStrategy):
         for norm_q, markets in by_norm.items():
             if len(markets) < 2:
                 continue
-            # Attach parsed end dates, drop markets without them
+            # Sort by RESOLUTION DATE (parsed from question title), not the
+            # raw endDate field. Polymarket recycles markets and sometimes
+            # leaves endDate set to a date that doesn't match the title's
+            # actual deadline. Sorting by endDate would put a "by May 31"
+            # market BEFORE a "by May 6" one if its endDate happened to be
+            # earlier — producing inverted pairs. The resolution date
+            # parsed from the title is the source of truth.
             dated = []
             for m in markets:
-                d = self._parse_end_date(m.get('endDate'))
+                d = self._market_resolution_date(m)
                 if d is not None:
                     dated.append((m, d))
             dated.sort(key=lambda x: x[1])
@@ -1430,7 +1440,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 for j in range(i + 1, len(dated)):
                     late_m, late_end = dated[j]
                     if early_end >= late_end:
-                        continue  # Same endDate or inverted → not a calendar pair
+                        continue  # Same date or inverted → not a calendar pair
+                    # Defense in depth: also let the unified validator have
+                    # a say (rejects past-resolution early legs etc.).
+                    if not self._validate_temporal_containment(early_m, late_m):
+                        continue
                     key_tuple = tuple(sorted((early_m['id'], late_m['id'])))
                     if key_tuple in existing_pair_keys:
                         continue
@@ -1441,6 +1455,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "late_id": late_m['id'],
                         "description": f"Regex auto-match (identical normalized title): \"{norm_q[:80]}\"",
                         "early_question": early_m.get('question', ''),
+                        "late_question": late_m.get('question', ''),
                         "resolution_match_confidence": 1.0,
                         "discovery_method": "regex_exact",
                     })
@@ -1458,7 +1473,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     new_count += 1
                     self.logger.info(
                         f"🎯 Auto-confirmed regex pair: '{norm_q[:60]}' "
-                        f"(early ends {early_end.date()}, late ends {late_end.date()})"
+                        f"(early resolves {early_end.date()}, late resolves {late_end.date()})"
                     )
 
         if new_count > 0:
