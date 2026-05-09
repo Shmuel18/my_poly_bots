@@ -305,6 +305,13 @@ def api_positions():
     positions: List[Dict[str, Any]] = []
     if DATA_DIR.exists():
         for path in DATA_DIR.glob("positions_*.json"):
+            # Skip backup / archive files. The bot writes one canonical
+            # ``positions_<addr>.json`` per account; anything with a
+            # suffix like ``positions_<addr>.backup-<ts>.json`` is a
+            # snapshot, not a live state, and should not show up as
+            # active positions on the dashboard.
+            if ".backup-" in path.name or ".bak" in path.name:
+                continue
             data = _read_json(path, {})
             if isinstance(data, dict):
                 for token_id, pos in data.items():
