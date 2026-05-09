@@ -2021,6 +2021,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "rejected": len(self.rejected_pairs),
                 "trades_entered": int(self.stats.get("trades_entered", 0)),
                 "trades_exited": int(self.stats.get("trades_exited", 0)),
+                "wins": int(self.stats.get("wins", 0)),
+                "losses": int(self.stats.get("losses", 0)),
+                "total_pnl_usd": round(float(self.stats.get("total_pnl", 0.0)), 4),
                 "open_positions": len(getattr(self, "open_positions", {}) or {}),
                 "loop": int(self.stats.get("scans", 0)),
             }
@@ -2049,6 +2052,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "stats": {
                     "trades_entered": int(self.stats.get("trades_entered", 0)),
                     "trades_exited": int(self.stats.get("trades_exited", 0)),
+                    "wins": int(self.stats.get("wins", 0)),
+                    "losses": int(self.stats.get("losses", 0)),
+                    "total_pnl_usd": round(float(self.stats.get("total_pnl", 0.0)), 4),
                 },
                 "open_positions": len(getattr(self, "open_positions", {}) or {}),
                 "pair_counts": {
@@ -2436,9 +2442,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 await self._emergency_sell(yes_late_token, size - filled)
 
             if no_ok and yes_ok:
-                # Calculate P&L
-                exit_value = (bid_no["price"] if bid_no else 0) + (bid_yes["price"] if bid_yes else 0)
-                pnl = exit_value - entry_cost - (2 * self.estimated_fee)
+                # Calculate P&L per share-pair AND in absolute dollars.
+                # ``entry_cost`` here is the per-share-pair cost, so total
+                # USD P&L = (exit - entry - fees) × size.
+                exit_no  = bid_no["price"]  if bid_no  else 0
+                exit_yes = bid_yes["price"] if bid_yes else 0
+                exit_value = exit_no + exit_yes
+                # Per-leg entry prices for the alert breakdown.
+                entry_no  = position.get("ask_no_early")  or 0
+                entry_yes = position.get("ask_yes_late")  or 0
+                pnl_per_share = exit_value - entry_cost - (2 * self.estimated_fee)
+                pnl_usd = pnl_per_share * size
                 
                 # Save to database if enabled
                 if self.use_database and self.db:
@@ -2446,12 +2460,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         # Get position IDs from database
                         no_pos = await self.db.get_position_by_token(no_early_token, self.strategy_name)
                         yes_pos = await self.db.get_position_by_token(yes_late_token, self.strategy_name)
-                        
+
                         if no_pos:
                             await self.db.close_position(
                                 position_id=no_pos["id"],
-                                exit_price=bid_no["price"] if bid_no else 0,
-                                pnl=pnl / 2,  # Split P&L between legs
+                                exit_price=exit_no,
+                                pnl=pnl_usd / 2,  # Split P&L between legs
                             )
                             await self.db.record_trade(
                                 position_id=no_pos["id"],
@@ -2459,15 +2473,15 @@ class CalendarArbitrageStrategy(BaseStrategy):
                                 token_id=no_early_token,
                                 side="SELL",
                                 size=size,
-                                price=bid_no["price"] if bid_no else 0,
+                                price=exit_no,
                                 fee=self.estimated_fee * size,
                             )
-                        
+
                         if yes_pos:
                             await self.db.close_position(
                                 position_id=yes_pos["id"],
-                                exit_price=bid_yes["price"] if bid_yes else 0,
-                                pnl=pnl / 2,
+                                exit_price=exit_yes,
+                                pnl=pnl_usd / 2,
                             )
                             await self.db.record_trade(
                                 position_id=yes_pos["id"],
@@ -2475,32 +2489,57 @@ class CalendarArbitrageStrategy(BaseStrategy):
                                 token_id=yes_late_token,
                                 side="SELL",
                                 size=size,
-                                price=bid_yes["price"] if bid_yes else 0,
+                                price=exit_yes,
                                 fee=self.estimated_fee * size,
                             )
-                        
-                        self.logger.debug(f"💾 Saved exit to database. P&L: {pnl:.4f}")
+
+                        self.logger.debug(f"💾 Saved exit to database. P&L: ${pnl_usd:+.4f}")
                     except Exception as e:
                         self.logger.warning(f"Failed to save exit to database: {e}")
-                
+
                 # Clean up positions from memory and manager
                 self.open_positions.pop(no_early_token, None)
                 self.open_positions.pop(yes_late_token, None)
                 self.position_manager.remove_position(no_early_token)
                 self.position_manager.remove_position(yes_late_token)
-                
+
+                # Update strategy-level stats: trade count, total $ PnL, win/
+                # loss tally. Used both internally and in the heartbeat that
+                # the dashboard reads.
                 self.stats["trades_exited"] += 1
-                self.logger.info(f"✅ Successfully exited both legs (P&L: {pnl:.4f})")
-                # Notify Telegram so the user sees capital rotations in real time
+                self.stats["total_pnl"] = float(self.stats.get("total_pnl", 0.0)) + pnl_usd
+                if pnl_usd >= 0:
+                    self.stats["wins"] = int(self.stats.get("wins", 0)) + 1
+                else:
+                    self.stats["losses"] = int(self.stats.get("losses", 0)) + 1
+                wins = int(self.stats.get("wins", 0))
+                losses = int(self.stats.get("losses", 0))
+                wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+
+                self.logger.info(
+                    f"✅ Exited both legs | size={size} | "
+                    f"NO {entry_no:.3f}→{exit_no:.3f} | YES {entry_yes:.3f}→{exit_yes:.3f} | "
+                    f"P&L ${pnl_usd:+.2f} ({pnl_per_share*100:+.1f}%) | "
+                    f"running ${self.stats['total_pnl']:+.2f} ({wr:.0f}% WR over {wins+losses})"
+                )
+
+                # Notify Telegram with full per-leg breakdown so the user can
+                # see exactly which leg moved and the running strategy stats.
                 if self.telegram and self.telegram.enabled:
                     try:
-                        early_q = (position.get("early_question") or "")[:60]
-                        pnl_pct = (pnl / entry_cost * 100) if entry_cost else 0.0
+                        early_q = (position.get("early_question") or "")[:55]
+                        late_q  = (position.get("late_question")  or "")[:55]
+                        pnl_pct = pnl_per_share * 100  # per-share-pair pct
+                        no_pnl_usd  = (exit_no  - entry_no)  * size
+                        yes_pnl_usd = (exit_yes - entry_yes) * size
+                        emoji = "💰" if pnl_usd >= 0 else "📉"
                         await self.telegram.send_notice(
-                            f"💰 Early exit @ ${pnl:+.4f} ({pnl_pct:+.1f}%)\n"
-                            f"   Early: {early_q}\n"
-                            f"   Exit value ${exit_value:.4f} vs entry ${entry_cost:.4f} "
-                            f"(size={size})"
+                            f"{emoji} Pair exit @ ${pnl_usd:+.2f} ({pnl_pct:+.1f}%) · size {size}\n"
+                            f"📅 Early: {early_q}\n"
+                            f"   NO  bought {entry_no*100:.1f}¢ → sold {exit_no*100:.1f}¢   ({no_pnl_usd:+.2f})\n"
+                            f"📅 Late:  {late_q}\n"
+                            f"   YES bought {entry_yes*100:.1f}¢ → sold {exit_yes*100:.1f}¢  ({yes_pnl_usd:+.2f})\n"
+                            f"📊 Running: ${self.stats['total_pnl']:+.2f} · {wins}W/{losses}L · WR {wr:.0f}%"
                         )
                     except Exception as e:
                         self.logger.debug(f"Telegram exit notice failed: {e}")
