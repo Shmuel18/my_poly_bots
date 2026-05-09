@@ -849,6 +849,30 @@
         </div>
       </div>
 
+      <!-- Strategy performance KPIs: running PnL, win rate, trade counts -->
+      <div class="kpi-row">
+        <div class="kpi">
+          <div class="kpi-label" data-i18n="kpi.runningPnl">רווח/הפסד מצטבר</div>
+          <div id="kpi-running-pnl" class="kpi-value num">—</div>
+          <div class="kpi-sub" id="kpi-running-pnl-sub" data-i18n="kpi.runningPnl.sub">מאז הפעלה אחרונה</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label" data-i18n="kpi.winRate">אחוז הצלחה</div>
+          <div id="kpi-win-rate" class="kpi-value num">—</div>
+          <div class="kpi-sub" id="kpi-win-rate-sub" data-i18n="kpi.winRate.sub">—</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label" data-i18n="kpi.tradesEntered">עסקאות שנפתחו</div>
+          <div id="kpi-trades-entered" class="kpi-value num">—</div>
+          <div class="kpi-sub" data-i18n="kpi.tradesEntered.sub">סה״כ כניסות</div>
+        </div>
+        <div class="kpi">
+          <div class="kpi-label" data-i18n="kpi.tradesExited">עסקאות שנסגרו</div>
+          <div id="kpi-trades-exited" class="kpi-value num">—</div>
+          <div class="kpi-sub" data-i18n="kpi.tradesExited.sub">פוזיציות שנסגרו</div>
+        </div>
+      </div>
+
       <div class="grid-2col">
         <div class="panel">
           <div class="panel-head">
@@ -1115,6 +1139,14 @@ const I18N = {
     "kpi.opps.sub": "edge > 0%",
     "kpi.open": "פוזיציות פתוחות",
     "kpi.open.sub": "פוזיציות חיות",
+    "kpi.runningPnl": "רווח/הפסד מצטבר",
+    "kpi.runningPnl.sub": "מאז הפעלה אחרונה",
+    "kpi.winRate": "אחוז הצלחה",
+    "kpi.winRate.sub": "0W / 0L",
+    "kpi.tradesEntered": "עסקאות שנפתחו",
+    "kpi.tradesEntered.sub": "סה״כ כניסות",
+    "kpi.tradesExited": "עסקאות שנסגרו",
+    "kpi.tradesExited.sub": "פוזיציות שנסגרו",
     "panel.activity": "פעילות חיה",
     "panel.systemHealth": "בריאות המערכת",
     "feed.empty": "ממתין ל-loglines…",
@@ -1259,6 +1291,14 @@ const I18N = {
     "kpi.opps.sub": "edge > 0%",
     "kpi.open": "Open positions",
     "kpi.open.sub": "live positions",
+    "kpi.runningPnl": "Running P&L",
+    "kpi.runningPnl.sub": "since last restart",
+    "kpi.winRate": "Win rate",
+    "kpi.winRate.sub": "0W / 0L",
+    "kpi.tradesEntered": "Trades entered",
+    "kpi.tradesEntered.sub": "total entries",
+    "kpi.tradesExited": "Trades exited",
+    "kpi.tradesExited.sub": "positions closed",
     "panel.activity": "Live activity",
     "panel.systemHealth": "System health",
     "feed.empty": "Awaiting log lines…",
@@ -2291,6 +2331,49 @@ function render() {
   if (oppEl) oppEl.textContent = profitableCount;
   const openEl = document.getElementById("kpi-open");
   if (openEl) openEl.textContent = state.positions?.count ?? 0;
+
+  // Performance KPI row — aggregate across all strategies the bot reports.
+  // The strategy-level stats live in heartbeat.strategies.<key> with keys
+  // total_pnl_usd / wins / losses / trades_entered / trades_exited.
+  const perfStrategies = (status.heartbeat?.strategies) || {};
+  let totPnl = 0, totWins = 0, totLosses = 0, totEntered = 0, totExited = 0;
+  let havePerf = false;
+  for (const s of Object.values(perfStrategies)) {
+    if (typeof s.total_pnl_usd === "number") { totPnl += s.total_pnl_usd; havePerf = true; }
+    if (typeof s.wins === "number")          { totWins += s.wins; havePerf = true; }
+    if (typeof s.losses === "number")        { totLosses += s.losses; havePerf = true; }
+    if (typeof s.trades_entered === "number") totEntered += s.trades_entered;
+    if (typeof s.trades_exited === "number")  totExited  += s.trades_exited;
+  }
+  const pnlEl = document.getElementById("kpi-running-pnl");
+  if (pnlEl) {
+    pnlEl.textContent = havePerf
+      ? `${totPnl >= 0 ? "+" : "-"}$${Math.abs(totPnl).toFixed(2)}`
+      : "—";
+    pnlEl.classList.remove("g", "r");
+    if (havePerf) pnlEl.classList.add(totPnl >= 0 ? "g" : "r");
+  }
+  const wrEl = document.getElementById("kpi-win-rate");
+  const wrSubEl = document.getElementById("kpi-win-rate-sub");
+  const totalClosed = totWins + totLosses;
+  if (wrEl) {
+    wrEl.textContent = totalClosed > 0
+      ? `${((totWins / totalClosed) * 100).toFixed(0)}%`
+      : "—";
+    wrEl.classList.remove("g", "r");
+    if (totalClosed > 0) {
+      wrEl.classList.add(totWins / totalClosed >= 0.5 ? "g" : "r");
+    }
+  }
+  if (wrSubEl) {
+    wrSubEl.textContent = totalClosed > 0
+      ? `${totWins}W / ${totLosses}L`
+      : t("kpi.winRate.sub");
+  }
+  const enteredEl = document.getElementById("kpi-trades-entered");
+  if (enteredEl) enteredEl.textContent = totEntered;
+  const exitedEl = document.getElementById("kpi-trades-exited");
+  if (exitedEl) exitedEl.textContent = totExited;
 
   // Sidebar badges
   document.getElementById("nav-pair-count").textContent = pairs.counts.discovered;
