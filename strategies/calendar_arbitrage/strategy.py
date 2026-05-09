@@ -555,11 +555,19 @@ class CalendarArbitrageStrategy(BaseStrategy):
             cand = datetime(year, month, day, 23, 59, tzinfo=timezone.utc)
         except (ValueError, TypeError):
             return None
-        if not year_str and cand <= ref:
-            try:
-                cand = datetime(year + 1, month, day, 23, 59, tzinfo=timezone.utc)
-            except (ValueError, TypeError):
-                return None
+        # NEVER bump to next year on relative phrases. Polymarket's
+        # convention: when a market title says "by [DATE]" without an
+        # explicit year, that date is THIS YEAR — even if the date is
+        # already past. Past dates indicate a market in its
+        # post-deadline / resolution-pending phase. Bumping to next
+        # year would treat a market awaiting payout as a brand-new
+        # 12-months-out market, inverting calendar pairs against
+        # sibling markets in the same event (Epstein "by May 8" vs
+        # "by May 31" with both in May 2026 — bumping makes May 8
+        # parse to May 2027 and look LATER than May 31 2026).
+        # If a market is genuinely for next year, the operator writes
+        # "by [DATE], [YEAR]" with explicit year — caught by the
+        # year_str branch above.
         return cand
 
     def _market_resolution_date(self, market: Optional[Dict[str, Any]]):
