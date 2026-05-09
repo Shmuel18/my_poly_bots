@@ -320,6 +320,64 @@ def api_positions():
     return JSONResponse({"positions": positions, "count": len(positions)})
 
 
+# ----- Pending-pair approval/rejection from the dashboard ---------------
+# The bot loads pending/confirmed/rejected dicts ONCE at startup and only
+# writes them on its own scan loop. To let the dashboard mutate that
+# state without racing the bot's writes, we append the user's intent to
+# a small queue file (``dashboard_approvals.json``); the bot drains it
+# at the top of every scan and applies the changes.
+APPROVALS_FILE = DATA_DIR / "dashboard_approvals.json"
+
+
+def _append_approval(pair_key: str, action: str) -> Dict[str, Any]:
+    """Add an entry to the queue. Returns the resulting state."""
+    if not isinstance(pair_key, str) or not pair_key:
+        return {"ok": False, "error": "invalid pair_key"}
+    if action not in ("confirm", "reject"):
+        return {"ok": False, "error": f"invalid action: {action}"}
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    queue: List[Dict[str, Any]] = []
+    try:
+        if APPROVALS_FILE.exists():
+            queue = json.loads(APPROVALS_FILE.read_text(encoding="utf-8") or "[]")
+            if not isinstance(queue, list):
+                queue = []
+    except Exception:
+        queue = []
+    # Replace any pending entry for the same pair_key — last write wins.
+    queue = [q for q in queue if q.get("pair_key") != pair_key]
+    queue.append({
+        "pair_key": pair_key,
+        "action": action,
+        "queued_at": int(time.time()),
+        "source": "dashboard",
+    })
+    APPROVALS_FILE.write_text(json.dumps(queue, ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    return {"ok": True, "queued": len(queue), "applied_on_next_scan": True}
+
+
+@app.post("/api/pairs/{pair_key}/confirm")
+def api_pair_confirm(pair_key: str):
+    return JSONResponse(_append_approval(pair_key, "confirm"))
+
+
+@app.post("/api/pairs/{pair_key}/reject")
+def api_pair_reject(pair_key: str):
+    return JSONResponse(_append_approval(pair_key, "reject"))
+
+
+@app.get("/api/approvals/queue")
+def api_approvals_queue():
+    """Inspect the queue. Useful for debugging — drain happens in the bot."""
+    if not APPROVALS_FILE.exists():
+        return JSONResponse({"queue": []})
+    try:
+        return JSONResponse({"queue": json.loads(APPROVALS_FILE.read_text(encoding="utf-8"))})
+    except Exception:
+        return JSONResponse({"queue": []})
+
+
 @app.get("/api/logs")
 def api_logs(n: int = 60):
     n = max(1, min(400, int(n)))

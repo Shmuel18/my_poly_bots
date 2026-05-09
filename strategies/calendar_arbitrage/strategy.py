@@ -1645,7 +1645,98 @@ class CalendarArbitrageStrategy(BaseStrategy):
         )
         return len(dropped)
 
+    def _drain_dashboard_approvals(self) -> int:
+        """Apply pending confirm/reject commands queued by the dashboard.
+
+        The dashboard process (read-only otherwise) writes user clicks
+        on ✅/❌ buttons into ``data/dashboard_approvals.json`` as a
+        list of ``{pair_key, action, queued_at, source}`` entries. The
+        bot drains that list at the start of every scan, applies the
+        moves between pending / confirmed / rejected dicts, and clears
+        the file. This keeps the dashboard write path simple (one
+        append-only file) and avoids race conditions with the bot's
+        own state writes.
+        """
+        path = os.path.join("data", "dashboard_approvals.json")
+        if not os.path.exists(path):
+            return 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                queue = json.load(f) or []
+        except Exception as e:
+            self.logger.warning(f"approvals queue parse failed: {e}")
+            return 0
+        if not isinstance(queue, list) or not queue:
+            return 0
+        applied = 0
+        import time as _time
+        now = _time.time()
+        for entry in queue:
+            if not isinstance(entry, dict): continue
+            pair_key = entry.get("pair_key")
+            action = entry.get("action")
+            if not pair_key or action not in ("confirm", "reject"): continue
+            # Locate the pair in pending — if it's not there we silently
+            # skip (already approved via Telegram, already purged, etc.)
+            state = self.pending_pairs.pop(pair_key, None)
+            if state is None:
+                # Maybe the user clicked confirm on a pair that was already
+                # confirmed from another source — also skip without logging
+                # an error.
+                self.logger.debug(
+                    f"approval queued for {pair_key} but not in pending_pairs; ignoring"
+                )
+                continue
+            if action == "confirm":
+                self.confirmed_pairs[pair_key] = {
+                    "confirmed_at": now,
+                    "confirmed_by": "dashboard",
+                    "early_id":  state.get("early_id"),
+                    "late_id":   state.get("late_id"),
+                    "early_question": state.get("early_question"),
+                    "late_question": state.get("late_question"),
+                    **{k: v for k, v in state.items() if k not in
+                       ("alerted", "opened_at")},
+                }
+                self.logger.info(
+                    f"✅ Dashboard confirmed pair {pair_key}: "
+                    f"{(state.get('early_question') or '')[:50]}"
+                )
+            else:  # reject
+                self.rejected_pairs[pair_key] = {
+                    "rejected_at": now,
+                    "rejected_by": "dashboard",
+                    "early_id":  state.get("early_id"),
+                    "late_id":   state.get("late_id"),
+                    "early_question": state.get("early_question"),
+                    "late_question": state.get("late_question"),
+                }
+                self.logger.info(
+                    f"❌ Dashboard rejected pair {pair_key}: "
+                    f"{(state.get('early_question') or '')[:50]}"
+                )
+            applied += 1
+        # Always persist + clear the queue so a parse error doesn't loop.
+        if applied:
+            self._save_json_state(self.PENDING_FILE,   self.pending_pairs)
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self._save_json_state(self.REJECTED_FILE,  self.rejected_pairs)
+        try:
+            os.remove(path)
+        except Exception:
+            try:
+                with open(path, "w", encoding="utf-8") as f: f.write("[]")
+            except Exception:
+                pass
+        if applied:
+            self.logger.info(f"🔘 Drained {applied} dashboard approval(s)")
+        return applied
+
     async def scan(self) -> List[Dict[str, Any]]:
+        # Drain dashboard approvals before anything else so user clicks
+        # take effect on the same scan they were submitted.
+        self._drain_dashboard_approvals()
+
         # Fast pre-flight: drop any saved pair whose question titles already
         # parse as inverted (early resolution > late) or past. These were
         # added by older code that trusted Polymarket's endDate field even

@@ -347,6 +347,31 @@
   .progress-fill.g { background: var(--green); }
   .progress-fill.r { background: var(--red); }
 
+  /* ============ Approval / Reject buttons on pending cards ============ */
+  .approval-row {
+    display: flex; gap: 8px; margin-top: 12px;
+    border-top: 1px dashed var(--border); padding-top: 12px;
+  }
+  .approval-row button {
+    flex: 1;
+    padding: 9px 12px; border-radius: 7px;
+    font-size: 13px; font-weight: 600;
+    cursor: pointer;
+    transition: opacity 0.12s, transform 0.05s;
+    border: 1px solid transparent;
+  }
+  .approval-row button:hover { opacity: 0.9; }
+  .approval-row button:active { transform: translateY(1px); }
+  .approval-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-approve {
+    background: var(--green); color: #fff;
+  }
+  .btn-reject {
+    background: var(--panel-alt); color: var(--red-strong);
+    border-color: var(--border-strong) !important;
+  }
+  .btn-reject:hover { background: var(--red-bg); }
+
   /* ============ Per-leg orderbook table on pair cards ============ */
   .leg-prices {
     display: grid; grid-template-columns: 60px 1fr 1fr; gap: 4px 8px;
@@ -1147,6 +1172,12 @@ const I18N = {
     "kpi.tradesEntered.sub": "סה״כ כניסות",
     "kpi.tradesExited": "עסקאות שנסגרו",
     "kpi.tradesExited.sub": "פוזיציות שנסגרו",
+    "approve.confirm": "אשר",
+    "approve.reject": "דחה",
+    "approve.confirmPrompt": "לאשר את הזוג? הבוט יסחר אותו במלואו ב-$20 כשיהיה ארב.",
+    "approve.rejectPrompt": "לדחות את הזוג? הוא יוצא מהמעקב לצמיתות.",
+    "approve.queued": "הפעולה תתבצע בסריקה הבאה (תוך כ-13 דקות).",
+    "approve.failed": "הפעולה נכשלה — נסה שוב.",
     "panel.activity": "פעילות חיה",
     "panel.systemHealth": "בריאות המערכת",
     "feed.empty": "ממתין ל-loglines…",
@@ -1299,6 +1330,12 @@ const I18N = {
     "kpi.tradesEntered.sub": "total entries",
     "kpi.tradesExited": "Trades exited",
     "kpi.tradesExited.sub": "positions closed",
+    "approve.confirm": "Confirm",
+    "approve.reject": "Reject",
+    "approve.confirmPrompt": "Confirm this pair? The bot will trade it at full size when an arb appears.",
+    "approve.rejectPrompt": "Reject this pair? It will be removed from monitoring permanently.",
+    "approve.queued": "Action will apply on the next scan (within ~13 min).",
+    "approve.failed": "Action failed — please retry.",
     "panel.activity": "Live activity",
     "panel.systemHealth": "System health",
     "feed.empty": "Awaiting log lines…",
@@ -1589,6 +1626,15 @@ function renderPairCard(p) {
         ${endB ? `<span>${t("card.endsPrefix")} ${fmtDate(endB)}</span>` : ""}
         ${isDup && p.llm_confidence != null ? `<span class="meta-sep">·</span><span>conf ${(p.llm_confidence*100).toFixed(0)}%</span>` : ""}
       </div>
+      ${p.tier === "pending" ? `
+      <div class="approval-row">
+        <button class="btn-approve" data-pair-key="${escapeHtml(p.pair_key || "")}" data-action="confirm">
+          ✅ ${escapeHtml(t("approve.confirm"))}
+        </button>
+        <button class="btn-reject" data-pair-key="${escapeHtml(p.pair_key || "")}" data-action="reject">
+          ❌ ${escapeHtml(t("approve.reject"))}
+        </button>
+      </div>` : ""}
     </div>`;
 }
 
@@ -2466,6 +2512,47 @@ document.addEventListener("keydown", e => {
     e.preventDefault();
     searchInput.focus();
     searchInput.select();
+  }
+});
+
+/* ============ Pending-pair approval / reject buttons ============ */
+// Delegated click handler — works for any future card render too.
+document.addEventListener("click", async e => {
+  const btn = e.target.closest(".btn-approve, .btn-reject");
+  if (!btn) return;
+  const pairKey = btn.dataset.pairKey;
+  const action  = btn.dataset.action;
+  if (!pairKey || !action) return;
+  const promptKey = action === "confirm" ? "approve.confirmPrompt" : "approve.rejectPrompt";
+  if (!window.confirm(t(promptKey))) return;
+  // Disable both buttons in the row while the request is in flight so we
+  // can't double-submit if the user double-clicks.
+  const row = btn.parentElement;
+  if (row) row.querySelectorAll("button").forEach(b => b.disabled = true);
+  btn.textContent = "…";
+  try {
+    const resp = await fetch(`/api/pairs/${encodeURIComponent(pairKey)}/${action}`,
+                             { method: "POST" });
+    const data = await resp.json();
+    if (data.ok) {
+      btn.textContent = action === "confirm" ? "✅" : "❌";
+      // Toast-like feedback in the same row.
+      if (row) {
+        const note = document.createElement("span");
+        note.style.cssText = "flex:1; text-align:center; font-size:12px; color:var(--text-2); align-self:center;";
+        note.textContent = t("approve.queued");
+        row.appendChild(note);
+      }
+      // Refresh pairs in 1s so the card disappears once the bot drains
+      // the queue (or at least the visual cue stays in place).
+      setTimeout(refresh, 1500);
+    } else {
+      btn.textContent = "⚠ " + (data.error || "");
+      if (row) row.querySelectorAll("button").forEach(b => b.disabled = false);
+    }
+  } catch (err) {
+    btn.textContent = t("approve.failed");
+    if (row) row.querySelectorAll("button").forEach(b => b.disabled = false);
   }
 });
 
