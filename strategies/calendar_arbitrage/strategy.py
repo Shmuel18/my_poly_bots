@@ -2326,10 +2326,43 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 if size <= 0:
                     return True
 
+        # C3: rollback exhausted → we hold a NAKED leg. Persist it so the
+        # operator (and dashboard) can see it, and fire an urgent Telegram
+        # alert. Silent naked exposure is the worst failure mode for a
+        # money bot — one unhedged leg can lose the full position value.
         self.logger.critical(
             f"🚨 ROLLBACK EXHAUSTED for {token_id[:12]} — tried prices {attempts}. "
             f"MANUAL INTERVENTION REQUIRED: hold {size:.2f} units open."
         )
+        try:
+            import time as _t
+            path = os.path.join("data", "naked_exposure.json")
+            existing = []
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or []
+            if not isinstance(existing, list):
+                existing = []
+            existing.append({
+                "token_id": token_id,
+                "units_open": round(float(size), 4),
+                "tried_prices": attempts,
+                "detected_at": _t.time(),
+                "resolved": False,
+            })
+            self._save_json_state(path, existing)
+        except Exception as e:
+            self.logger.error(f"Failed to record naked exposure: {e}")
+        if self.telegram and getattr(self.telegram, "enabled", False):
+            try:
+                await self.telegram.send_notice(
+                    f"🚨🚨 NAKED EXPOSURE — manual action needed\n"
+                    f"Token {token_id[:16]}… — {size:.2f} units could NOT be "
+                    f"rolled back (tried {attempts}).\n"
+                    f"Hedge or close this leg manually on Polymarket NOW."
+                )
+            except Exception as e:
+                self.logger.debug(f"naked-exposure telegram alert failed: {e}")
         return False
 
     async def enter_position(self, opportunity: Dict[str, Any]) -> bool:
@@ -2368,44 +2401,54 @@ class CalendarArbitrageStrategy(BaseStrategy):
             )
             return False
 
-        # CRITICAL: pre-trade balance check. Prevents submitting the first leg and
-        # then discovering we can't afford the second.
-        required_usdc = (fill_no["avg_price"] + fill_yes["avg_price"]) * size
-        try:
-            balance = await self.executor.get_balance()
-        except Exception as e:
-            self.logger.error(f"⚠️ Balance check failed, refusing to trade: {e}")
-            return False
-        # Keep a small buffer for rounding/fees on the exchange side.
-        if balance < required_usdc * 1.02:
-            self.logger.warning(
-                f"⚠️ Insufficient USDC: balance=${balance:.2f} < required=${required_usdc * 1.02:.2f} "
-                f"(size={size}, combined_ask=${(fill_no['avg_price'] + fill_yes['avg_price']):.4f})"
-            )
-            return False
-
+        # CRITICAL SECTION (C2): the balance-check→submit sequence must be
+        # atomic across strategies. calendar_arb and duplicate_arb share one
+        # connection; without this lock both could read the same balance,
+        # both pass the affordability check, and both submit — overdrafting
+        # the wallet. The shared asyncio.Lock serializes the read→submit so
+        # the second strategy re-checks against the post-trade balance.
+        # Rollback (_emergency_sell below) stays OUTSIDE the lock: it only
+        # re-credits balance, so the other strategy seeing the pre-rollback
+        # (debited) balance is conservative, not unsafe.
         tier = opportunity.get("tier", "probe")
-        self.logger.info(f"🧮 Calendar Arbitrage Opportunity [tier={tier.upper()}]:")
-        self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} (avg: ${fill_no['avg_price']:.4f})")
-        self.logger.info(f"   Late(YES) ask: ${price_yes_late:.4f} (avg: ${fill_yes['avg_price']:.4f})")
-        self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | With slippage: ${total_cost_with_slippage:.4f}")
-        self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
-        self.logger.info(f"   Balance: ${balance:.2f} | Required: ${required_usdc:.2f} | Size: {size}")
-        self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
-        self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
+        async with self.connection.trade_lock:
+            # pre-trade balance check. Prevents submitting the first leg and
+            # then discovering we can't afford the second.
+            required_usdc = (fill_no["avg_price"] + fill_yes["avg_price"]) * size
+            try:
+                balance = await self.executor.get_balance()
+            except Exception as e:
+                self.logger.error(f"⚠️ Balance check failed, refusing to trade: {e}")
+                return False
+            # Keep a small buffer for rounding/fees on the exchange side.
+            if balance < required_usdc * 1.02:
+                self.logger.warning(
+                    f"⚠️ Insufficient USDC: balance=${balance:.2f} < required=${required_usdc * 1.02:.2f} "
+                    f"(size={size}, combined_ask=${(fill_no['avg_price'] + fill_yes['avg_price']):.4f})"
+                )
+                return False
 
-        # Execute both legs concurrently. FOK (Fill-Or-Kill) guarantees all-or-nothing
-        # per leg at the limit price — no partial fills, no lingering limit orders.
-        tasks = [
-            self.executor.execute_trade(
-                token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"], order_type="FOK"
-            ),
-            self.executor.execute_trade(
-                token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"], order_type="FOK"
-            ),
-        ]
+            self.logger.info(f"🧮 Calendar Arbitrage Opportunity [tier={tier.upper()}]:")
+            self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} (avg: ${fill_no['avg_price']:.4f})")
+            self.logger.info(f"   Late(YES) ask: ${price_yes_late:.4f} (avg: ${fill_yes['avg_price']:.4f})")
+            self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | With slippage: ${total_cost_with_slippage:.4f}")
+            self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
+            self.logger.info(f"   Balance: ${balance:.2f} | Required: ${required_usdc:.2f} | Size: {size}")
+            self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
+            self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Execute both legs concurrently. FOK (Fill-Or-Kill) guarantees all-or-nothing
+            # per leg at the limit price — no partial fills, no lingering limit orders.
+            tasks = [
+                self.executor.execute_trade(
+                    token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"], order_type="FOK"
+                ),
+                self.executor.execute_trade(
+                    token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"], order_type="FOK"
+                ),
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Check both success flag AND filled size to guard against brokers that
         # return success on partial fills.

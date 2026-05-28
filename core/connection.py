@@ -81,8 +81,23 @@ class PolymarketConnection:
             'CHAIN_ID': chain_id,
         }
         self.dry_run = dry_run
+        # Shared async lock serializing the balance-check→submit critical
+        # section. Multiple strategies (calendar_arb + duplicate_arb) share
+        # ONE connection via asyncio.gather; without this they could both
+        # read the balance, both pass the affordability check, and both
+        # submit — overdrafting the wallet. Lazily created on first use so
+        # it binds to the running event loop.
+        self._trade_lock = None
         self._validate_env_vars()
         self._init_client()
+
+    @property
+    def trade_lock(self):
+        """Lazily-created asyncio.Lock bound to the active event loop."""
+        import asyncio as _asyncio
+        if self._trade_lock is None:
+            self._trade_lock = _asyncio.Lock()
+        return self._trade_lock
         
     def _get_or_env(self, key: str, env_name: str, default: Optional[str] = None):
         """מעדיף ערך מוזרם, אחרת מהסביבה, אחרת ברירת מחדל"""
