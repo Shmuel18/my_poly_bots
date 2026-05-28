@@ -89,7 +89,13 @@ class MultiStrategyHeartbeat:
 
             try:
                 os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
-                with open(self.path, "w", encoding="utf-8") as f:
+                # Atomic write so the dashboard never reads a half-written
+                # snapshot (it polls this file every 10s while we write it).
+                tmp = f"{self.path}.tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(self._state, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, self.path)
             except Exception as e:
                 logger.warning(f"Heartbeat write failed: {e}")

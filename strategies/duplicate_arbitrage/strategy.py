@@ -164,12 +164,23 @@ class DuplicateArbitrageStrategy(BaseStrategy):
             return {}
 
     def _save_json(self, path: str, data: Any):
+        # Atomic write (temp + fsync + os.replace) — see calendar strategy
+        # _save_json_state for rationale.
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except Exception as e:
             self.logger.error(f"Failed to save {path}: {e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
 
     @staticmethod
     def _pair_key(id_a: str, id_b: str) -> str:

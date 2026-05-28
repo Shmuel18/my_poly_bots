@@ -71,14 +71,61 @@ class BaseStrategy(ABC):
         self.open_positions: Dict[str, Dict[str, Any]] = {}
         self.seen_opportunities: set = set()
         
-        # Statistics
+        # Statistics — persisted to disk so PnL / win-loss record survives
+        # restarts (previously every restart zeroed the trade history, which
+        # made strategy performance impossible to measure over time).
         self.stats = {
             'scans': 0,
             'opportunities_found': 0,
             'trades_entered': 0,
             'trades_exited': 0,
-            'total_pnl': 0.0
+            'total_pnl': 0.0,
+            'wins': 0,
+            'losses': 0,
         }
+        import os as _os
+        self._stats_file = _os.path.join("data", f"stats_{wallet_short}_{strategy_name}.json")
+        self._load_stats()
+
+    def _load_stats(self):
+        """Merge persisted stats over the defaults. Resilient to a missing
+        or corrupt file."""
+        import os as _os
+        import json as _json
+        if not _os.path.exists(self._stats_file):
+            return
+        try:
+            with open(self._stats_file, "r", encoding="utf-8") as f:
+                saved = _json.load(f)
+            if isinstance(saved, dict):
+                for k, v in saved.items():
+                    if k in self.stats and isinstance(v, (int, float)):
+                        self.stats[k] = v
+            # 'scans' is per-process (loop counter); don't restore it.
+            self.stats['scans'] = 0
+            self.logger.info(
+                f"📂 Restored stats: {self.stats.get('wins',0)}W/"
+                f"{self.stats.get('losses',0)}L, "
+                f"PnL ${self.stats.get('total_pnl',0.0):+.2f}"
+            )
+        except Exception as e:
+            self.logger.warning(f"Failed to load stats ({self._stats_file}): {e}")
+
+    def _save_stats(self):
+        """Atomic write of the stats dict so a crash mid-write can't corrupt
+        the trade record."""
+        import os as _os
+        import json as _json
+        try:
+            _os.makedirs(_os.path.dirname(self._stats_file) or ".", exist_ok=True)
+            tmp = f"{self._stats_file}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                _json.dump(self.stats, f, ensure_ascii=False, indent=2)
+                f.flush()
+                _os.fsync(f.fileno())
+            _os.replace(tmp, self._stats_file)
+        except Exception as e:
+            self.logger.debug(f"Failed to save stats: {e}")
     
     @abstractmethod
     async def scan(self) -> List[Dict[str, Any]]:
@@ -170,6 +217,7 @@ class BaseStrategy(ABC):
             )
             
             self.stats['trades_entered'] += 1
+            self._save_stats()
             self.logger.info(f"✅ Position entered successfully (size: {actual_size})")
             return True
         
@@ -216,7 +264,12 @@ class BaseStrategy(ABC):
             
             self.stats['trades_exited'] += 1
             self.stats['total_pnl'] += pnl
-            
+            if pnl >= 0:
+                self.stats['wins'] = self.stats.get('wins', 0) + 1
+            else:
+                self.stats['losses'] = self.stats.get('losses', 0) + 1
+            self._save_stats()
+
             self.logger.info(f"✅ Position exited: ${pnl:.2f} ({pnl_pct:+.1f}%)")
             
             # Remove from both memory and disk
@@ -227,40 +280,89 @@ class BaseStrategy(ABC):
             self.logger.warning(f"Failed to close position in executor")
             return False
     
+    # How many consecutive scan failures before we escalate to Telegram.
+    _SCAN_FAIL_ALERT_THRESHOLD = 3
+
     async def scan_loop(self):
         """לולאת סריקה"""
+        consecutive_failures = 0
+        alerted = False
         while self.running:
             try:
                 self.stats['scans'] += 1
                 self.logger.info(f"🔍 Scan #{self.stats['scans']}")
-                
+
                 # Scan for opportunities
                 opportunities = await self.scan()
-                
+
                 if opportunities:
                     self.logger.info(f"💡 Found {len(opportunities)} opportunities")
                     self.stats['opportunities_found'] += len(opportunities)
-                    
+
                     # Check each opportunity
                     for opp in opportunities:
                         token_id = opp.get('token_id')
-                        
+
                         # Skip if already seen or in position
                         if token_id in self.seen_opportunities or token_id in self.open_positions:
                             continue
-                        
+
                         self.seen_opportunities.add(token_id)
-                        
+
                         # Check if should enter
                         if await self.should_enter(opp):
                             await self.enter_position(opp)
-                
+
+                # Scan succeeded — reset the failure tracker and, if we'd
+                # previously alerted, tell the operator we recovered.
+                if consecutive_failures >= self._SCAN_FAIL_ALERT_THRESHOLD and alerted:
+                    await self._notify_scan_recovered(consecutive_failures)
+                consecutive_failures = 0
+                alerted = False
+
                 # Wait before next scan
                 await asyncio.sleep(self.scan_interval)
-                
+
             except Exception as e:
-                self.logger.error(f"Error in scan loop: {e}")
+                consecutive_failures += 1
+                self.logger.error(
+                    f"Error in scan loop (consecutive #{consecutive_failures}): {e}",
+                    exc_info=True,
+                )
+                # Escalate to Telegram once we've failed N scans in a row, so
+                # a stuck bot isn't invisible (systemd still sees the process
+                # alive). Alert only once per failure streak to avoid spam.
+                if consecutive_failures >= self._SCAN_FAIL_ALERT_THRESHOLD and not alerted:
+                    await self._notify_scan_failing(consecutive_failures, e)
+                    alerted = True
                 await asyncio.sleep(60)
+
+    async def _notify_scan_failing(self, count: int, exc: Exception):
+        """Best-effort Telegram alert that the scan loop is stuck. No-op if
+        the strategy has no telegram notifier configured."""
+        tg = getattr(self, "telegram", None)
+        if not tg or not getattr(tg, "enabled", False):
+            return
+        try:
+            await tg.send_notice(
+                f"🚨 {self.strategy_name}: scan failing — {count} consecutive "
+                f"errors.\nLast error: {str(exc)[:200]}\n"
+                f"Bot is alive but NOT scanning. Check the VPS."
+            )
+        except Exception as e:
+            self.logger.debug(f"scan-failure telegram alert failed: {e}")
+
+    async def _notify_scan_recovered(self, count: int):
+        tg = getattr(self, "telegram", None)
+        if not tg or not getattr(tg, "enabled", False):
+            return
+        try:
+            await tg.send_notice(
+                f"✅ {self.strategy_name}: scanning recovered after {count} "
+                f"failed scan(s)."
+            )
+        except Exception as e:
+            self.logger.debug(f"scan-recovery telegram alert failed: {e}")
     
     async def monitor_loop(self):
         """לולאת מעקב אחר פוזיציות"""

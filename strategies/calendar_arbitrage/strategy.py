@@ -198,12 +198,26 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return {}
 
     def _save_json_state(self, path: str, data: Dict[str, Any]):
+        # Atomic write: serialize to a temp file in the same dir, fsync,
+        # then os.replace (atomic on POSIX). A crash mid-write can no
+        # longer leave a half-written state file that the bot would fail
+        # to parse on restart — which previously could wipe the entire
+        # discovered/confirmed/pending pair set.
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except Exception as e:
             self.logger.error(f"Failed to save {path}: {e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
 
     @staticmethod
     def _pair_key(early_id: str, late_id: str) -> str:
@@ -325,9 +339,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self._save_discovered_pairs()
 
     def _save_discovered_pairs(self):
+        # Atomic write (temp + fsync + os.replace) so a crash mid-write
+        # can't corrupt discovered_pairs.json — the file the bot reloads
+        # its entire watch list from on restart.
         try:
-            with open(self.PAIRS_FILE, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(self.PAIRS_FILE) or ".", exist_ok=True)
+            tmp = f"{self.PAIRS_FILE}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.discovered_pairs, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.PAIRS_FILE)
         except Exception as e:
             self.logger.warning(f"Failed to save discovered pairs: {e}")
 
@@ -729,6 +751,78 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return float(p), float(s) if s is not None else 0.0
         except (TypeError, ValueError):
             return None, None
+
+    # How long to wait for a single orderbook fetch before giving up. The
+    # py-clob-client get_order_book is a blocking requests call with no
+    # timeout of its own — without this wrapper one hung endpoint stalls
+    # the entire scan loop indefinitely.
+    ORDERBOOK_TIMEOUT_S = 5.0
+    # Max concurrent orderbook fetches. Keeps us from hammering the CLOB
+    # (rate-limit / IP-ban risk) while still parallelizing heavily.
+    ORDERBOOK_CONCURRENCY = 20
+
+    async def _fetch_books_parallel(self, token_ids) -> Dict[str, Any]:
+        """Fetch multiple orderbooks concurrently, deduped, each with a
+        timeout. Returns {token_id: book_or_None}.
+
+        Replaces the old pattern of 8 sequential blocking calls per pair
+        (_best_ask + _best_bid on 4 tokens, each re-fetching the same
+        book). Now: 4 unique books per pair, fetched in parallel off the
+        event loop via run_in_executor, each guarded by
+        ORDERBOOK_TIMEOUT_S. A slow/hung book resolves to None instead of
+        blocking the scan."""
+        uniq = list(dict.fromkeys(t for t in token_ids if t))
+        if not uniq:
+            return {}
+        loop = asyncio.get_event_loop()
+        sem = getattr(self, "_ob_semaphore", None)
+        if sem is None:
+            sem = asyncio.Semaphore(self.ORDERBOOK_CONCURRENCY)
+            self._ob_semaphore = sem
+
+        async def _one(tid):
+            async with sem:
+                try:
+                    return await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, self.executor.client.get_order_book, tid
+                        ),
+                        timeout=self.ORDERBOOK_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.debug(f"orderbook timeout {tid[:12]}")
+                    return None
+                except Exception as e:
+                    self.logger.debug(f"orderbook fetch failed {tid[:12]}: {e}")
+                    return None
+
+        books = await asyncio.gather(*[_one(t) for t in uniq])
+        return dict(zip(uniq, books))
+
+    @classmethod
+    def _ask_from_book(cls, book) -> Optional[Dict[str, float]]:
+        """Lowest ask from a pre-fetched book (or None). Robust to
+        Polymarket's descending ask sort — scans for the min price."""
+        best_p, best_s = None, None
+        for e in cls._orderbook_side(book, "asks"):
+            p, s = cls._orderbook_entry(e)
+            if p is None:
+                continue
+            if best_p is None or p < best_p:
+                best_p, best_s = p, s
+        return {"price": best_p, "size": best_s or 0.0} if best_p is not None else None
+
+    @classmethod
+    def _bid_from_book(cls, book) -> Optional[Dict[str, float]]:
+        """Highest bid from a pre-fetched book (or None)."""
+        best_p, best_s = None, None
+        for e in cls._orderbook_side(book, "bids"):
+            p, s = cls._orderbook_entry(e)
+            if p is None:
+                continue
+            if best_p is None or p > best_p:
+                best_p, best_s = p, s
+        return {"price": best_p, "size": best_s or 0.0} if best_p is not None else None
 
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
         """Lowest ask in the book — the price we'd pay to BUY right now.
@@ -1900,15 +1994,23 @@ class CalendarArbitrageStrategy(BaseStrategy):
 
             yes_early, no_early = tid_early[0], tid_early[1]
             yes_late,  no_late  = tid_late[0], tid_late[1]
+            # Fetch all four unique orderbooks for this pair in parallel,
+            # each with a timeout. Previously this was 8 sequential blocking
+            # calls (best_ask + best_bid each re-fetched the same book);
+            # now it's 4 concurrent fetches with no re-fetch and no hang
+            # risk. ~8x faster per pair and immune to a single stuck book.
+            books = await self._fetch_books_parallel([yes_early, no_early, yes_late, no_late])
             # The arb leg we trade: NO on early + YES on late.
-            ask_no, ask_yes = self._best_ask(no_early), self._best_ask(yes_late)
-            bid_no, bid_yes = self._best_bid(no_early), self._best_bid(yes_late)
-            # The OTHER side of each market — fetched so the dashboard can
-            # show full YES-bid/YES-ask/NO-bid/NO-ask for both legs (the
-            # same view Polymarket itself shows). Cheap because the
-            # orderbook is per-token and we already have the IDs.
-            ask_yes_e = self._best_ask(yes_early); bid_yes_e = self._best_bid(yes_early)
-            ask_no_l  = self._best_ask(no_late);   bid_no_l  = self._best_bid(no_late)
+            ask_no  = self._ask_from_book(books.get(no_early))
+            ask_yes = self._ask_from_book(books.get(yes_late))
+            bid_no  = self._bid_from_book(books.get(no_early))
+            bid_yes = self._bid_from_book(books.get(yes_late))
+            # The OTHER side of each market — for the dashboard's full
+            # YES/NO ask+bid view of both legs.
+            ask_yes_e = self._ask_from_book(books.get(yes_early))
+            bid_yes_e = self._bid_from_book(books.get(yes_early))
+            ask_no_l  = self._ask_from_book(books.get(no_late))
+            bid_no_l  = self._bid_from_book(books.get(no_late))
 
             pair_key = self._pair_key(pair['early_id'], pair['late_id'])
             days = self._days_until_close(late.get("endDate"))
@@ -2611,6 +2713,8 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     self.stats["wins"] = int(self.stats.get("wins", 0)) + 1
                 else:
                     self.stats["losses"] = int(self.stats.get("losses", 0)) + 1
+                # Persist immediately so the trade record survives a restart.
+                self._save_stats()
                 wins = int(self.stats.get("wins", 0))
                 losses = int(self.stats.get("losses", 0))
                 wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
