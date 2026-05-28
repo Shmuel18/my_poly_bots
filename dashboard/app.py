@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -126,6 +126,24 @@ def _parse_latest_balance(log_path: Path | None) -> float | None:
     return None
 
 
+# Lines matching these patterns are redacted before the (public) dashboard
+# serves them. Defense in depth: the bot itself shouldn't log secrets, but
+# if any code path ever does, this prevents the log-tail endpoint from
+# leaking key material / API secrets / private keys to anyone who can hit
+# /api/logs.
+_SECRET_LINE_RE = re.compile(
+    r"(private[_-]?key|api[_-]?secret|api[_-]?passphrase|passphrase|"
+    r"mnemonic|seed[_-]?phrase|0x[a-fA-F0-9]{40,})",
+    re.IGNORECASE,
+)
+
+
+def _scrub_secret(line: str) -> str:
+    if _SECRET_LINE_RE.search(line):
+        return "[redacted — line matched a secret pattern]"
+    return line
+
+
 def _tail_log(log_path: Path | None, n_lines: int = 60) -> List[str]:
     if not log_path or not log_path.exists():
         return []
@@ -140,7 +158,7 @@ def _tail_log(log_path: Path | None, n_lines: int = 60) -> List[str]:
         # Strip ANSI colour escapes
         tail_text = re.sub(r"\x1b\[[0-9;]*m", "", tail_text)
         lines = tail_text.strip().splitlines()
-        return lines[-n_lines:]
+        return [_scrub_secret(ln) for ln in lines[-n_lines:]]
     except Exception:
         return []
 
@@ -190,6 +208,31 @@ def env_page():
     if ENV_HTML.exists():
         return HTMLResponse(ENV_HTML.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>Env</h1><p>env.html missing.</p>")
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness+freshness probe for external uptime monitors.
+
+    Returns 200 only when the bot wrote its heartbeat recently. A stale
+    heartbeat (bot crashed, hung on an orderbook fetch, or stuck in a
+    scan-failure sleep loop) returns 503 so UptimeRobot / Healthchecks.io
+    can alert. ``max_age_s`` defaults to 1800s (30 min) — generous given
+    scans can take a while, but catches a truly dead bot.
+    """
+    max_age_s = 1800
+    hb = _read_json(DATA_DIR / "status_snapshot.json", {})
+    updated = hb.get("updated_at") if isinstance(hb, dict) else None
+    now = time.time()
+    age = (now - updated) if isinstance(updated, (int, float)) else None
+    healthy = age is not None and age <= max_age_s
+    body = {
+        "status": "ok" if healthy else "stale",
+        "heartbeat_age_s": round(age, 1) if age is not None else None,
+        "max_age_s": max_age_s,
+        "server_time": int(now),
+    }
+    return JSONResponse(body, status_code=200 if healthy else 503)
 
 
 @app.get("/api/status")
@@ -329,8 +372,22 @@ def api_positions():
 APPROVALS_FILE = DATA_DIR / "dashboard_approvals.json"
 
 
+# Optional write-protection for the approval endpoints. When
+# POLYBOT_APPROVAL_TOKEN is set in the environment, confirm/reject
+# require a matching ``X-Approve-Token`` header. Off by default so the
+# current (pre-go-live) dashboard keeps working; flip it on before
+# making the site public for real-money trading.
+APPROVAL_TOKEN = os.getenv("POLYBOT_APPROVAL_TOKEN", "").strip()
+
+
+def _check_approval_token(request_token: str | None) -> bool:
+    if not APPROVAL_TOKEN:
+        return True  # protection disabled
+    return bool(request_token) and request_token == APPROVAL_TOKEN
+
+
 def _append_approval(pair_key: str, action: str) -> Dict[str, Any]:
-    """Add an entry to the queue. Returns the resulting state."""
+    """Add an entry to the queue (atomic write). Returns resulting state."""
     if not isinstance(pair_key, str) or not pair_key:
         return {"ok": False, "error": "invalid pair_key"}
     if action not in ("confirm", "reject"):
@@ -352,18 +409,25 @@ def _append_approval(pair_key: str, action: str) -> Dict[str, Any]:
         "queued_at": int(time.time()),
         "source": "dashboard",
     })
-    APPROVALS_FILE.write_text(json.dumps(queue, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+    # Atomic write: temp file + os.replace so a crash mid-write can't leave
+    # a half-written queue (which the bot would fail to parse and skip).
+    tmp = APPROVALS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(queue, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, APPROVALS_FILE)
     return {"ok": True, "queued": len(queue), "applied_on_next_scan": True}
 
 
 @app.post("/api/pairs/{pair_key}/confirm")
-def api_pair_confirm(pair_key: str):
+def api_pair_confirm(pair_key: str, request: Request):
+    if not _check_approval_token(request.headers.get("X-Approve-Token")):
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
     return JSONResponse(_append_approval(pair_key, "confirm"))
 
 
 @app.post("/api/pairs/{pair_key}/reject")
-def api_pair_reject(pair_key: str):
+def api_pair_reject(pair_key: str, request: Request):
+    if not _check_approval_token(request.headers.get("X-Approve-Token")):
+        return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
     return JSONResponse(_append_approval(pair_key, "reject"))
 
 

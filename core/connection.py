@@ -135,8 +135,25 @@ class PolymarketConnection:
             chain_id_val = self._get_or_env('CHAIN_ID', 'CHAIN_ID', 137)
             chain_id = int(chain_id_val) if isinstance(chain_id_val, (str, int)) else 137
 
-            logger.info("[DEBUG] Polymarket Init: api_key=%s... api_secret=%s... api_passphrase=%s...", api_key[:6], api_secret[:6], api_passphrase[:6])
-            logger.info("[DEBUG] private_key=%s... funder_address=%s", str(private_key)[:8], str(funder_address))
+            # SECURITY: never log secret material — not even truncated. Logs
+            # are tailed by the (public) dashboard via /api/logs, so any key
+            # fragment is an exposure. Log only presence booleans and a
+            # short non-reversible fingerprint of the funder address for
+            # support/debugging.
+            import hashlib as _hashlib
+            _funder_fp = (
+                _hashlib.sha256(str(funder_address).encode()).hexdigest()[:8]
+                if funder_address else "none"
+            )
+            logger.info(
+                "Polymarket init: api_key=%s api_secret=%s api_passphrase=%s "
+                "private_key=%s funder_fp=%s",
+                "set" if api_key else "missing",
+                "set" if api_secret else "missing",
+                "set" if api_passphrase else "missing",
+                "set" if private_key else "MISSING",
+                _funder_fp,
+            )
 
             # Determine signature type dynamically
             sig_type = 1 if funder_address else 0

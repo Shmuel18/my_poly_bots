@@ -2531,8 +2531,20 @@ document.addEventListener("click", async e => {
   if (row) row.querySelectorAll("button").forEach(b => b.disabled = true);
   btn.textContent = "…";
   try {
+    // Send the approval token if the operator stored one (localStorage
+    // key "approveToken"). Harmless when the server has protection off.
+    const headers = {};
+    const tok = localStorage.getItem("approveToken");
+    if (tok) headers["X-Approve-Token"] = tok;
     const resp = await fetch(`/api/pairs/${encodeURIComponent(pairKey)}/${action}`,
-                             { method: "POST" });
+                             { method: "POST", headers });
+    if (resp.status === 401) {
+      btn.textContent = "🔒";
+      const pw = window.prompt("Approval token required:");
+      if (pw) { localStorage.setItem("approveToken", pw); }
+      if (row) row.querySelectorAll("button").forEach(b => b.disabled = false);
+      return;
+    }
     const data = await resp.json();
     if (data.ok) {
       btn.textContent = action === "confirm" ? "✅" : "❌";
