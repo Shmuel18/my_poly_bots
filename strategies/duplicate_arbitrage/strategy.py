@@ -164,12 +164,23 @@ class DuplicateArbitrageStrategy(BaseStrategy):
             return {}
 
     def _save_json(self, path: str, data: Any):
+        # Atomic write (temp + fsync + os.replace) — see calendar strategy
+        # _save_json_state for rationale.
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except Exception as e:
             self.logger.error(f"Failed to save {path}: {e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
 
     @staticmethod
     def _pair_key(id_a: str, id_b: str) -> str:
@@ -677,37 +688,45 @@ class DuplicateArbitrageStrategy(BaseStrategy):
             return False
 
         required = total * size
-        try:
-            balance = await self.executor.get_balance()
-        except Exception as e:
-            self.logger.error(f"⚠️ Balance fetch failed: {e}")
-            return False
-        if balance < required * 1.02:
-            self.logger.warning(
-                f"⚠️ Insufficient USDC: ${balance:.2f} < required ${required * 1.02:.2f}"
-            )
-            return False
-
         tier = opp.get("tier", "probe")
-        self.logger.info(f"🔁 [tier={tier.upper()}] Duplicate-Arb Opportunity:")
-        self.logger.info(f"   Direction: {opp['direction']} (size {size})")
-        self.logger.info(f"   Leg1 ask ${opp['leg1_ask']:.4f} (avg ${f1['avg_price']:.4f})")
-        self.logger.info(f"   Leg2 ask ${opp['leg2_ask']:.4f} (avg ${f2['avg_price']:.4f})")
-        self.logger.info(f"   Total ${total:.4f} (profit ${1 - total:.4f} / {(1-total)*100:.1f}%)")
-        self.logger.info(f"   A: {(opp.get('a_question') or '')[:60]}")
-        self.logger.info(f"   B: {(opp.get('b_question') or '')[:60]}")
+        # CRITICAL SECTION (C2): serialize balance-check→submit across
+        # strategies that share this connection (calendar_arb + this one)
+        # so they can't both pass the affordability check and overdraft.
+        # See calendar strategy for the full rationale. Rollback stays
+        # outside the lock (re-credit only → conservative for the peer).
+        # connection.trade_lock is a property that always returns an
+        # asyncio.Lock bound to the running loop.
+        async with self.connection.trade_lock:
+            try:
+                balance = await self.executor.get_balance()
+            except Exception as e:
+                self.logger.error(f"⚠️ Balance fetch failed: {e}")
+                return False
+            if balance < required * 1.02:
+                self.logger.warning(
+                    f"⚠️ Insufficient USDC: ${balance:.2f} < required ${required * 1.02:.2f}"
+                )
+                return False
 
-        tasks = [
-            self.executor.execute_trade(
-                token_id=leg1_token, side="BUY", size=size,
-                price=f1["avg_price"], order_type="FOK",
-            ),
-            self.executor.execute_trade(
-                token_id=leg2_token, side="BUY", size=size,
-                price=f2["avg_price"], order_type="FOK",
-            ),
-        ]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            self.logger.info(f"🔁 [tier={tier.upper()}] Duplicate-Arb Opportunity:")
+            self.logger.info(f"   Direction: {opp['direction']} (size {size})")
+            self.logger.info(f"   Leg1 ask ${opp['leg1_ask']:.4f} (avg ${f1['avg_price']:.4f})")
+            self.logger.info(f"   Leg2 ask ${opp['leg2_ask']:.4f} (avg ${f2['avg_price']:.4f})")
+            self.logger.info(f"   Total ${total:.4f} (profit ${1 - total:.4f} / {(1-total)*100:.1f}%)")
+            self.logger.info(f"   A: {(opp.get('a_question') or '')[:60]}")
+            self.logger.info(f"   B: {(opp.get('b_question') or '')[:60]}")
+
+            tasks = [
+                self.executor.execute_trade(
+                    token_id=leg1_token, side="BUY", size=size,
+                    price=f1["avg_price"], order_type="FOK",
+                ),
+                self.executor.execute_trade(
+                    token_id=leg2_token, side="BUY", size=size,
+                    price=f2["avg_price"], order_type="FOK",
+                ),
+            ]
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
         def leg_ok(res, exp):
             return (

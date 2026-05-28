@@ -81,8 +81,23 @@ class PolymarketConnection:
             'CHAIN_ID': chain_id,
         }
         self.dry_run = dry_run
+        # Shared async lock serializing the balance-check→submit critical
+        # section. Multiple strategies (calendar_arb + duplicate_arb) share
+        # ONE connection via asyncio.gather; without this they could both
+        # read the balance, both pass the affordability check, and both
+        # submit — overdrafting the wallet. Lazily created on first use so
+        # it binds to the running event loop.
+        self._trade_lock = None
         self._validate_env_vars()
         self._init_client()
+
+    @property
+    def trade_lock(self):
+        """Lazily-created asyncio.Lock bound to the active event loop."""
+        import asyncio as _asyncio
+        if self._trade_lock is None:
+            self._trade_lock = _asyncio.Lock()
+        return self._trade_lock
         
     def _get_or_env(self, key: str, env_name: str, default: Optional[str] = None):
         """מעדיף ערך מוזרם, אחרת מהסביבה, אחרת ברירת מחדל"""
@@ -135,8 +150,25 @@ class PolymarketConnection:
             chain_id_val = self._get_or_env('CHAIN_ID', 'CHAIN_ID', 137)
             chain_id = int(chain_id_val) if isinstance(chain_id_val, (str, int)) else 137
 
-            logger.info("[DEBUG] Polymarket Init: api_key=%s... api_secret=%s... api_passphrase=%s...", api_key[:6], api_secret[:6], api_passphrase[:6])
-            logger.info("[DEBUG] private_key=%s... funder_address=%s", str(private_key)[:8], str(funder_address))
+            # SECURITY: never log secret material — not even truncated. Logs
+            # are tailed by the (public) dashboard via /api/logs, so any key
+            # fragment is an exposure. Log only presence booleans and a
+            # short non-reversible fingerprint of the funder address for
+            # support/debugging.
+            import hashlib as _hashlib
+            _funder_fp = (
+                _hashlib.sha256(str(funder_address).encode()).hexdigest()[:8]
+                if funder_address else "none"
+            )
+            logger.info(
+                "Polymarket init: api_key=%s api_secret=%s api_passphrase=%s "
+                "private_key=%s funder_fp=%s",
+                "set" if api_key else "missing",
+                "set" if api_secret else "missing",
+                "set" if api_passphrase else "missing",
+                "set" if private_key else "MISSING",
+                _funder_fp,
+            )
 
             # Determine signature type dynamically
             sig_type = 1 if funder_address else 0

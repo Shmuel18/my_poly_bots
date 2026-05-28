@@ -198,12 +198,26 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return {}
 
     def _save_json_state(self, path: str, data: Dict[str, Any]):
+        # Atomic write: serialize to a temp file in the same dir, fsync,
+        # then os.replace (atomic on POSIX). A crash mid-write can no
+        # longer leave a half-written state file that the bot would fail
+        # to parse on restart — which previously could wipe the entire
+        # discovered/confirmed/pending pair set.
         try:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
         except Exception as e:
             self.logger.error(f"Failed to save {path}: {e}")
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except Exception:
+                pass
 
     @staticmethod
     def _pair_key(early_id: str, late_id: str) -> str:
@@ -325,9 +339,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
         self._save_discovered_pairs()
 
     def _save_discovered_pairs(self):
+        # Atomic write (temp + fsync + os.replace) so a crash mid-write
+        # can't corrupt discovered_pairs.json — the file the bot reloads
+        # its entire watch list from on restart.
         try:
-            with open(self.PAIRS_FILE, "w", encoding="utf-8") as f:
+            os.makedirs(os.path.dirname(self.PAIRS_FILE) or ".", exist_ok=True)
+            tmp = f"{self.PAIRS_FILE}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(self.discovered_pairs, f, ensure_ascii=False, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self.PAIRS_FILE)
         except Exception as e:
             self.logger.warning(f"Failed to save discovered pairs: {e}")
 
@@ -472,6 +494,125 @@ class CalendarArbitrageStrategy(BaseStrategy):
         except Exception:
             return None
 
+    # Months → number, used by the question-title date parser below.
+    _MONTH_LOOKUP = {m: i + 1 for i, m in enumerate(MONTH_WORDS)}
+
+    # Capture group 1: "by"|"before"|"until"|"prior to"|"no later than"|"end of"
+    # Group 2: optional "the", group 3: optional "end of "
+    # Group 4 = month name OR full numeric date OR bare year.
+    # We compile a non-greedy version that surfaces both the month/day/year
+    # parts; the calling helper does the actual interpretation.
+    _RESOLUTION_DATE_RE = re.compile(
+        r"\b(?:by|until|before|prior\s+to|no\s+later\s+than|end\s+of)\s+"
+        r"(?:the\s+)?(?:end\s+of\s+)?"
+        r"("
+        + r"|".join(MONTH_WORDS) +
+        r")(?:\s+(\d{1,2}))?(?:[,]?\s+(\d{4}))?"           # month [day] [year]
+        r"|\b(?:by|until|before|prior\s+to|no\s+later\s+than|end\s+of)\s+"
+        r"(?:the\s+)?(?:end\s+of\s+)?"
+        r"(\d{4})\b",                                        # bare year
+        re.IGNORECASE,
+    )
+
+    def _resolution_date_from_question(self, question: Optional[str], reference: Optional[Any] = None):
+        """Extract the deadline a market actually resolves on from its title.
+
+        Polymarket's ``endDate`` field is when *trading* closes, which is
+        not always the same as when the question resolves. Recycled
+        markets can carry an ``endDate`` weeks after the resolution
+        criterion (e.g. "Iran closes airspace by May 8" with
+        ``endDate=May 31``). Sorting / containment by ``endDate``
+        therefore inverts pairs and produces fake edges. The title is
+        the source of truth: it always names the resolution date.
+
+        Returns a timezone-aware datetime (UTC, end of day) or None when
+        no parseable deadline is in the question.
+
+        ``reference`` is an optional anchor datetime used to disambiguate
+        bare month phrases like "by April 30?" — without a year, we
+        assume the next occurrence on or after the reference (default
+        now()). Calendar arb needs the FUTURE instance, never the past.
+        """
+        if not question or not isinstance(question, str):
+            return None
+        from datetime import datetime, timezone
+        m = self._RESOLUTION_DATE_RE.search(question.lower())
+        if not m:
+            return None
+        month_name, day_str, year_str, bare_year = m.groups()
+
+        # Bare year ("by 2027" / "before 2026") → Dec 31 of that year
+        if bare_year:
+            try:
+                return datetime(int(bare_year), 12, 31, 23, 59, tzinfo=timezone.utc)
+            except (ValueError, TypeError):
+                return None
+
+        if not month_name:
+            return None
+        month = self._MONTH_LOOKUP.get(month_name.lower())
+        if not month:
+            return None
+        ref = reference or datetime.now(timezone.utc)
+        try:
+            day = int(day_str) if day_str else None
+        except (ValueError, TypeError):
+            day = None
+        # Pick year: explicit year wins; otherwise infer from the
+        # reference. If the resulting date would already be past, bump
+        # to next year (since "by April 30" in May means NEXT April).
+        if year_str:
+            try:
+                year = int(year_str)
+            except (ValueError, TypeError):
+                year = ref.year
+        else:
+            year = ref.year
+        # If no day provided, use last day of month — calendar arb
+        # treats "by April" as "by end of April".
+        if day is None:
+            from calendar import monthrange
+            day = monthrange(year, month)[1]
+        try:
+            cand = datetime(year, month, day, 23, 59, tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            return None
+        # NEVER bump to next year on relative phrases. Polymarket's
+        # convention: when a market title says "by [DATE]" without an
+        # explicit year, that date is THIS YEAR — even if the date is
+        # already past. Past dates indicate a market in its
+        # post-deadline / resolution-pending phase. Bumping to next
+        # year would treat a market awaiting payout as a brand-new
+        # 12-months-out market, inverting calendar pairs against
+        # sibling markets in the same event (Epstein "by May 8" vs
+        # "by May 31" with both in May 2026 — bumping makes May 8
+        # parse to May 2027 and look LATER than May 31 2026).
+        # If a market is genuinely for next year, the operator writes
+        # "by [DATE], [YEAR]" with explicit year — caught by the
+        # year_str branch above.
+        return cand
+
+    def _market_resolution_date(self, market: Optional[Dict[str, Any]]):
+        """Best-effort resolution date for a market: parse the question
+        title first; fall back to the ``endDate`` field if the title
+        doesn't carry a parseable deadline. Returns a tz-aware datetime
+        or None.
+
+        Anchors year-disambiguation to ``now()``, never to the market's
+        endDate. Polymarket recycles markets with stale endDate fields
+        (e.g. a "by May 6" market shown today as endDate=May 31), and
+        anchoring to that endDate would make the parser bump "by May 6"
+        to NEXT year (because May 6 is before the May 31 anchor) —
+        producing an inverted pair against the sibling "by May 31"
+        market. Using ``now`` keeps the future-most-instance semantics
+        without trusting a possibly-stale field."""
+        if not market:
+            return None
+        from_title = self._resolution_date_from_question(market.get("question"))
+        if from_title is not None:
+            return from_title
+        return self._parse_end_date(market.get("endDate"))
+
     def _days_until_close(self, end_date_str: Optional[str]) -> float:
         """חישוב ימים עד סגירת השוק."""
         end_date = self._parse_end_date(end_date_str)
@@ -486,17 +627,37 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return 365.0
 
     def _validate_temporal_containment(self, early: Dict, late: Dict) -> bool:
-        """Strict validation: early.endDate must be strictly earlier than late.endDate.
+        """Strict validation: early.endDate must be strictly earlier than late.endDate
+        AND early.endDate must be in the future.
 
-        This guards against false calendar-arb pairs where the LLM groups two markets
-        as same-event but their actual deadlines don't satisfy the "early ⊂ late"
-        containment property. Without this, we could buy a "guaranteed" arbitrage
-        that isn't guaranteed at all."""
-        early_end = self._parse_end_date(early.get("endDate"))
-        late_end = self._parse_end_date(late.get("endDate"))
+        Two failures this guards against:
+
+        1. Inverted pairs ("late" actually closes BEFORE "early"). Early⊂late
+           containment breaks and the calendar-arb math goes the other way:
+           you can hit a scenario where both legs lose simultaneously.
+
+        2. Stale-metadata pairs where the early leg's endDate already passed.
+           Polymarket recycles market IDs and sometimes leaves a market's
+           ``endDate`` field set to a past date even though the title says a
+           future deadline (e.g. "Will Russia capture Lyman by June 30, 2026?"
+           with endDate=2025-12-31). On those, the bot reads the old endDate,
+           validates against an even-later "late" market, and reports a fake
+           positive edge — but the early leg is effectively unsellable
+           (closed-but-not-closed market), so any "guaranteed +X%" is
+           illusory. Reject early_end <= now to refuse those entirely.
+        """
+        # Use the resolution date parsed from each market's question title
+        # rather than the ``endDate`` field. ``endDate`` is when trading
+        # closes — sometimes weeks after the question's actual deadline
+        # — and was producing inverted pairs (e.g. "by May 8" market
+        # had endDate May 31, sorting it AFTER "by May 15"). The title
+        # is the source of truth for resolution timing.
+        early_end = self._market_resolution_date(early)
+        late_end = self._market_resolution_date(late)
         if early_end is None or late_end is None:
             self.logger.debug(
-                f"Rejected pair: missing endDate (early={early.get('endDate')}, late={late.get('endDate')})"
+                f"Rejected pair: missing resolution date (early='{(early.get('question') or '')[:40]}', "
+                f"late='{(late.get('question') or '')[:40]}')"
             )
             return False
         if early_end > late_end:
@@ -506,6 +667,32 @@ class CalendarArbitrageStrategy(BaseStrategy):
             )
             return False
         if early_end == late_end:
+            return False
+        # Early leg must still be tradeable. Past resolution → stale
+        # market → fake edge.
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        # Also reject pairs whose markets have an endDate already past.
+        # When Polymarket's endDate is in the past, the market is either
+        # being finalized for resolution (orderbook frozen) or the operator
+        # forgot to update it. Either way the orderbook quotes are stale
+        # and any reported edge is illusory. The Hormuz "by end of April"
+        # market with endDate=2026-04-30 (already past) demonstrates this:
+        # NO bid 99.9¢ but no ask, YES ask 0.1¢ but no bid → essentially
+        # settled as NO, not actually tradeable.
+        for label, mkt in (("early", early), ("late", late)):
+            mkt_end = self._parse_end_date(mkt.get("endDate"))
+            if mkt_end is not None and mkt_end <= now_utc:
+                self.logger.debug(
+                    f"Rejected pair: {label} market endDate {mkt_end.isoformat()} "
+                    f"already past ('{mkt.get('question', '')[:50]}')"
+                )
+                return False
+        if early_end <= now_utc:
+            self.logger.debug(
+                f"Rejected pair: early endDate {early_end.isoformat()} already past "
+                f"('{early.get('question', '')[:50]}')"
+            )
             return False
         return True
     
@@ -565,28 +752,124 @@ class CalendarArbitrageStrategy(BaseStrategy):
         except (TypeError, ValueError):
             return None, None
 
+    # How long to wait for a single orderbook fetch before giving up. The
+    # py-clob-client get_order_book is a blocking requests call with no
+    # timeout of its own — without this wrapper one hung endpoint stalls
+    # the entire scan loop indefinitely.
+    ORDERBOOK_TIMEOUT_S = 5.0
+    # Max concurrent orderbook fetches. Keeps us from hammering the CLOB
+    # (rate-limit / IP-ban risk) while still parallelizing heavily.
+    ORDERBOOK_CONCURRENCY = 20
+
+    async def _fetch_books_parallel(self, token_ids) -> Dict[str, Any]:
+        """Fetch multiple orderbooks concurrently, deduped, each with a
+        timeout. Returns {token_id: book_or_None}.
+
+        Replaces the old pattern of 8 sequential blocking calls per pair
+        (_best_ask + _best_bid on 4 tokens, each re-fetching the same
+        book). Now: 4 unique books per pair, fetched in parallel off the
+        event loop via run_in_executor, each guarded by
+        ORDERBOOK_TIMEOUT_S. A slow/hung book resolves to None instead of
+        blocking the scan."""
+        uniq = list(dict.fromkeys(t for t in token_ids if t))
+        if not uniq:
+            return {}
+        loop = asyncio.get_event_loop()
+        sem = getattr(self, "_ob_semaphore", None)
+        if sem is None:
+            sem = asyncio.Semaphore(self.ORDERBOOK_CONCURRENCY)
+            self._ob_semaphore = sem
+
+        async def _one(tid):
+            async with sem:
+                try:
+                    return await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None, self.executor.client.get_order_book, tid
+                        ),
+                        timeout=self.ORDERBOOK_TIMEOUT_S,
+                    )
+                except asyncio.TimeoutError:
+                    self.logger.debug(f"orderbook timeout {tid[:12]}")
+                    return None
+                except Exception as e:
+                    self.logger.debug(f"orderbook fetch failed {tid[:12]}: {e}")
+                    return None
+
+        books = await asyncio.gather(*[_one(t) for t in uniq])
+        return dict(zip(uniq, books))
+
+    @classmethod
+    def _ask_from_book(cls, book) -> Optional[Dict[str, float]]:
+        """Lowest ask from a pre-fetched book (or None). Robust to
+        Polymarket's descending ask sort — scans for the min price."""
+        best_p, best_s = None, None
+        for e in cls._orderbook_side(book, "asks"):
+            p, s = cls._orderbook_entry(e)
+            if p is None:
+                continue
+            if best_p is None or p < best_p:
+                best_p, best_s = p, s
+        return {"price": best_p, "size": best_s or 0.0} if best_p is not None else None
+
+    @classmethod
+    def _bid_from_book(cls, book) -> Optional[Dict[str, float]]:
+        """Highest bid from a pre-fetched book (or None)."""
+        best_p, best_s = None, None
+        for e in cls._orderbook_side(book, "bids"):
+            p, s = cls._orderbook_entry(e)
+            if p is None:
+                continue
+            if best_p is None or p > best_p:
+                best_p, best_s = p, s
+        return {"price": best_p, "size": best_s or 0.0} if best_p is not None else None
+
     def _best_ask(self, token_id: str) -> Optional[Dict[str, float]]:
+        """Lowest ask in the book — the price we'd pay to BUY right now.
+
+        Polymarket's CLOB returns ``asks`` sorted by price descending
+        (worst → best). Taking ``asks[0]`` would give the WORST ask
+        ($0.99 on illiquid markets) and inflate every pair's entry cost
+        to ~$1.98, making the bot believe nothing is ever profitable.
+        We explicitly scan for the minimum price instead so we're
+        robust to API sort-order changes.
+        """
         try:
             book = self.executor.client.get_order_book(token_id)
             asks = self._orderbook_side(book, "asks")
-            if asks:
-                p, s = self._orderbook_entry(asks[0])
-                if p is not None:
-                    return {"price": p, "size": s or 0.0}
+            best_p, best_s = None, None
+            for entry in asks:
+                p, s = self._orderbook_entry(entry)
+                if p is None:
+                    continue
+                if best_p is None or p < best_p:
+                    best_p, best_s = p, s
+            if best_p is not None:
+                return {"price": best_p, "size": best_s or 0.0}
         except Exception as e:
             self.logger.debug(f"_best_ask failed for {token_id[:12]}: {e}")
             return None
         return None
 
     def _best_bid(self, token_id: str) -> Optional[Dict[str, float]]:
-        """Get best bid price (price we can sell at)."""
+        """Highest bid in the book — the price we'd get if we SELL now.
+
+        Bids come back sorted ascending (worst → best). ``bids[0]`` is
+        the LOWEST bid, useless to a seller. Take the maximum bid price
+        explicitly. Same robustness rationale as ``_best_ask``.
+        """
         try:
             book = self.executor.client.get_order_book(token_id)
             bids = self._orderbook_side(book, "bids")
-            if bids:
-                p, s = self._orderbook_entry(bids[0])
-                if p is not None:
-                    return {"price": p, "size": s or 0.0}
+            best_p, best_s = None, None
+            for entry in bids:
+                p, s = self._orderbook_entry(entry)
+                if p is None:
+                    continue
+                if best_p is None or p > best_p:
+                    best_p, best_s = p, s
+            if best_p is not None:
+                return {"price": best_p, "size": best_s or 0.0}
         except Exception as e:
             self.logger.debug(f"_best_bid failed for {token_id[:12]}: {e}")
             return None
@@ -608,13 +891,28 @@ class CalendarArbitrageStrategy(BaseStrategy):
             if not orders:
                 return None
 
+            # Polymarket returns asks sorted price DESCENDING and bids sorted
+            # price ASCENDING — i.e. worst-first in both cases. For fill
+            # simulation we want to consume from BEST first, so re-sort
+            # explicitly by what's "best" for the side we're trading:
+            #   BUY  consumes asks → ascending (lowest price first)
+            #   SELL consumes bids → descending (highest price first)
+            normalized = []
+            for o in orders:
+                p, s = self._orderbook_entry(o)
+                if p is None or s is None or s <= 0:
+                    continue
+                normalized.append((p, s))
+            if not normalized:
+                return None
+            normalized.sort(key=lambda x: x[0], reverse=(side == "SELL"))
+
             remaining_size = size
             total_cost = 0.0
             filled_size = 0.0
             first_price = None
 
-            for order in orders:
-                order_price, order_size = self._orderbook_entry(order)
+            for order_price, order_size in normalized:
                 if order_price is None or order_size is None or order_size <= 0:
                     continue
                 if first_price is None:
@@ -689,6 +987,515 @@ class CalendarArbitrageStrategy(BaseStrategy):
             return False
         return bool(self._MONOTONIC_DEADLINE_RE.search(question))
 
+    @staticmethod
+    def _event_series_key(event: Dict[str, Any]) -> Optional[str]:
+        """Return a stable series identifier for a Gamma event, or None.
+
+        Polymarket events expose their series in a few shapes depending on
+        the endpoint version. Try them in order:
+          1. ``series`` array (newest shape — list of ``{id, slug, title}``)
+          2. ``series`` dict (older shape — single ``{id, slug}``)
+          3. ``seriesSlug`` flat string
+          4. ``series_id`` flat int
+        Returns None when the event isn't part of any series (so it's
+        skipped by the discovery loop instead of bucketed alone).
+        """
+        series_field = event.get("series")
+        if isinstance(series_field, list) and series_field:
+            first = series_field[0]
+            if isinstance(first, dict):
+                slug = first.get("slug") or first.get("ticker")
+                if isinstance(slug, str) and slug:
+                    return slug
+                sid = first.get("id")
+                if sid is not None:
+                    return f"id:{sid}"
+        if isinstance(series_field, dict):
+            slug = series_field.get("slug") or series_field.get("ticker")
+            if isinstance(slug, str) and slug:
+                return slug
+            sid = series_field.get("id")
+            if sid is not None:
+                return f"id:{sid}"
+        slug = event.get("seriesSlug")
+        if isinstance(slug, str) and slug:
+            return slug
+        sid = event.get("series_id") or event.get("seriesId")
+        if sid is not None:
+            return f"id:{sid}"
+        return None
+
+    @staticmethod
+    def _binary_market_from_event(event: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract the single binary (YES/NO) market from a single-market
+        deadline-variant event, or None if the event doesn't fit that shape.
+
+        Series-based calendar arbitrage only makes sense when each event is
+        a single yes/no question with a hard deadline (e.g. "Russia x
+        Ukraine ceasefire by April 30"). Multi-outcome events (price
+        ranges, brackets, election tiers) need different handling and are
+        deferred to the LLM path.
+        """
+        markets = event.get("markets")
+        if not isinstance(markets, list) or len(markets) != 1:
+            return None
+        m = markets[0]
+        if not isinstance(m, dict):
+            return None
+        if not m.get("id"):
+            return None
+        # Reject multi-outcome markets — those need bracket logic, not calendar
+        outcomes = m.get("outcomes")
+        if isinstance(outcomes, str):
+            try:
+                outcomes = json.loads(outcomes)
+            except Exception:
+                outcomes = None
+        if isinstance(outcomes, list) and len(outcomes) != 2:
+            return None
+        return m
+
+    def _series_discover_pairs(
+        self,
+        market_map: Optional[Dict[str, Dict]] = None,
+        events: Optional[List[Dict]] = None,
+    ) -> int:
+        """Ground-truth calendar-arb discovery via Polymarket's own series
+        metadata.
+
+        Polymarket groups multi-deadline questions about the same event
+        into a single ``series`` (e.g. "Russia x Ukraine ceasefire" has
+        deadline variants by Apr 30, May 31, Jun 30, Dec 31, Jun 30 2027,
+        Dec 31 2027). When the operator wires those events into a series,
+        the resolution criteria are *guaranteed* identical apart from the
+        end date — exactly the calendar-arb monotonicity property.
+
+        This pre-pass:
+          1. Fetches active events (each carries ``series`` + ``markets``).
+          2. Groups events by series key.
+          3. For each series with ≥2 single-binary-market events, sorts
+             events by endDate and creates consecutive-pair entries.
+          4. Auto-adds them to ``confirmed_pairs`` (no LLM, no Telegram
+             gate) — Polymarket's own metadata is the strongest signal we
+             can possibly have.
+
+        Returns the count of newly-discovered pairs. Cheap to call every
+        scan: an event-batch refresh + dict bucketing.
+
+        Side effect: when ``market_map`` is provided, every market we
+        extract from a series event is merged into it. The default Gamma
+        ``/markets`` list endpoint paginates by recency / volume; tail
+        markets — multi-year deadline variants in slow series like
+        ``russia-x-ukraine-ceasefire-by-2027`` — frequently fall outside
+        the top 5000 returned. Without merging them here the monitoring
+        loop's ``market_map.get(pair['early_id'])`` returns ``None`` and
+        the pair is silently skipped, leaving the dashboard stuck on
+        "Waiting for orderbook pricing…".
+        """
+        import time as _time
+
+        if events is None:
+            try:
+                events = self.scanner.get_all_active_events(max_events=3000)
+            except AttributeError:
+                self.logger.warning(
+                    "Scanner missing get_all_active_events; series discovery skipped."
+                )
+                return 0
+            except Exception as e:
+                self.logger.warning(f"Series discovery: event fetch failed: {e}")
+                return 0
+        if not events:
+            return 0
+
+        # Group events by series key. Only events that (a) belong to a
+        # series and (b) carry exactly one binary market participate.
+        by_series: Dict[str, List[Dict[str, Any]]] = {}
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            skey = self._event_series_key(ev)
+            if not skey:
+                continue
+            mkt = self._binary_market_from_event(ev)
+            if not mkt:
+                continue
+            # Prefer the resolution date parsed from the market's title.
+            # ``endDate`` (event or market) is when trading closes, which
+            # can be weeks after the actual resolution criterion on
+            # recycled Polymarket markets. The title is authoritative.
+            end_dt = self._market_resolution_date(mkt)
+            if end_dt is None:
+                # Fallback: try the event's own endDate as a last resort.
+                end_dt = self._parse_end_date(ev.get("endDate"))
+            if end_dt is None:
+                continue
+            by_series.setdefault(skey, []).append({
+                "event": ev,
+                "market": mkt,
+                "end": end_dt,
+            })
+
+        if not by_series:
+            return 0
+
+        existing_pair_keys = {
+            tuple(sorted((p.get("early_id", ""), p.get("late_id", ""))))
+            for p in self.discovered_pairs
+        }
+
+        new_count = 0
+        backfilled = False
+        now = _time.time()
+        for skey, entries in by_series.items():
+            if len(entries) < 2:
+                continue
+            entries.sort(key=lambda x: x["end"])
+            # Drop duplicates that share an end date (shouldn't normally
+            # happen inside a series but guards against operator typos).
+            uniq: List[Dict[str, Any]] = []
+            seen_ends = set()
+            for e in entries:
+                key = e["end"].isoformat()
+                if key in seen_ends:
+                    continue
+                seen_ends.add(key)
+                uniq.append(e)
+            if len(uniq) < 2:
+                continue
+
+            # Consecutive pairs only. The non-consecutive pairs (i, i+2),
+            # (i, i+3), … are implied by transitivity of the early⊂late
+            # containment, so monitoring just the (i, i+1) chain catches
+            # every spread without quadratic blowup. Larger-gap arbs that
+            # the consecutive chain can't price-check are rare and not
+            # worth the noise.
+            for i in range(len(uniq) - 1):
+                early = uniq[i]
+                late = uniq[i + 1]
+                early_m = early["market"]
+                late_m = late["market"]
+                # Reject series where the events are NOT monotonic-deadline
+                # questions. Polymarket groups several non-calendar shapes
+                # under "series": rolling 5-min crypto windows ("XRP Up or
+                # Down 11:30-11:35"), sports matchups on the same date
+                # ("KBO: Eagles vs Landers"), tournament brackets, etc.
+                # Those satisfy "shared series" but NOT "early⊂late
+                # containment" — the YES outcome of one window says
+                # nothing about the next. Requiring monotonic phrasing
+                # ("by X", "before X", "until X", "end of X") on both
+                # endpoints keeps only true calendar chains.
+                if not (
+                    self._has_monotonic_deadline(early_m.get("question", ""))
+                    and self._has_monotonic_deadline(late_m.get("question", ""))
+                ):
+                    continue
+                if not self._validate_temporal_containment(early_m, late_m):
+                    continue
+                # Inject markets into the caller's map BEFORE the
+                # already-known check so previously-saved series pairs also
+                # get their legs price-checkable on every scan.
+                if market_map is not None:
+                    market_map.setdefault(early_m["id"], early_m)
+                    market_map.setdefault(late_m["id"], late_m)
+                pair_tuple = tuple(sorted((early_m["id"], late_m["id"])))
+                if pair_tuple in existing_pair_keys:
+                    # Self-heal: backfill late_question / series_slug onto
+                    # existing pairs that were saved before those fields
+                    # were tracked. The dashboard uses pair.late_question
+                    # as a fallback when the live snapshot is empty.
+                    existing_q = (early_m.get("question")
+                                  or early["event"].get("title") or "")
+                    late_q_now = (late_m.get("question")
+                                  or late["event"].get("title") or "")
+                    for sp in self.discovered_pairs:
+                        sp_tuple = tuple(sorted((str(sp.get("early_id", "")),
+                                                 str(sp.get("late_id", "")))))
+                        if sp_tuple != pair_tuple:
+                            continue
+                        if not sp.get("late_question") and late_q_now:
+                            sp["late_question"] = late_q_now
+                            backfilled = True
+                        if not sp.get("series_slug"):
+                            sp["series_slug"] = skey
+                            backfilled = True
+                        if not sp.get("early_question") and existing_q:
+                            sp["early_question"] = existing_q
+                            backfilled = True
+                    continue
+                existing_pair_keys.add(pair_tuple)
+
+                early_q = (early_m.get("question")
+                           or early["event"].get("title")
+                           or "")
+                late_q = (late_m.get("question")
+                          or late["event"].get("title")
+                          or "")
+                series_title = (
+                    (early["event"].get("series") or [{}])[0].get("title")
+                    if isinstance(early["event"].get("series"), list)
+                    else (early["event"].get("series") or {}).get("title")
+                    if isinstance(early["event"].get("series"), dict)
+                    else None
+                ) or skey
+
+                self.discovered_pairs.append({
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "description": (
+                        f"Polymarket series '{series_title}': "
+                        f"{early['end'].date()} → {late['end'].date()}"
+                    ),
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "resolution_match_confidence": 1.0,
+                    "discovery_method": "series",
+                    "series_slug": skey,
+                })
+
+                pair_key = self._pair_key(early_m["id"], late_m["id"])
+                self.confirmed_pairs[pair_key] = {
+                    "confirmed_at": now,
+                    "confirmed_by": "series_auto",
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "series_slug": skey,
+                    "discovery_method": "series",
+                }
+                new_count += 1
+                self.logger.info(
+                    f"🔗 Series pair: '{series_title[:50]}' "
+                    f"({early['end'].date()} ⊂ {late['end'].date()})"
+                )
+
+        if new_count > 0:
+            self._save_discovered_pairs()
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self.logger.info(
+                f"🔗 Series discovery: {new_count} new auto-confirmed "
+                f"pair(s) across {len(by_series)} series"
+            )
+        elif backfilled:
+            # Persist backfilled late_question / series_slug onto existing
+            # entries so later restarts don't show empty leg labels again.
+            self._save_discovered_pairs()
+            self.logger.info("🔗 Series discovery: backfilled metadata on existing pairs")
+        return new_count
+
+    def _intra_event_discover_pairs(
+        self,
+        market_map: Optional[Dict[str, Dict]] = None,
+        events: Optional[List[Dict]] = None,
+    ) -> int:
+        """Calendar-arb discovery for the OTHER Polymarket multi-deadline shape.
+
+        Series discovery (``_series_discover_pairs``) handles the case where
+        each deadline variant is its own *event* sharing a series slug —
+        e.g. the Russia-x-Ukraine ceasefire has 6 separate events under
+        ``seriesSlug=russia-x-ukraine-ceasefire``.
+
+        But many calendar chains use a different shape: ONE event with N
+        markets *inside* it, each with a different endDate. Example:
+        ``trump-announces-us-blockade-of-hormuz-lifted-by`` — a single
+        event whose ``markets`` array contains 12 binary markets dated
+        Apr 23 / Apr 30 / May 8 / May 15 / May 22 / May 31 / … . The
+        event has no ``series`` field at all, so the existing series
+        method skips it; ``_binary_market_from_event`` rejects events
+        with ``len(markets) != 1``, leaving the chain entirely
+        unmonitored.
+
+        This method picks those up. It iterates every active event,
+        keeps the binary YES/NO markets that are still tradeable
+        (``closed=False``, 2 outcomes, parsable endDate), sorts them by
+        deadline, and emits consecutive ``(early, late)`` pairs the
+        same way the series method does. Side effect: every market it
+        accepts is merged into the caller's ``market_map`` so the
+        monitoring loop can price the new pairs immediately.
+
+        Auto-confirmed (``discovery_method="intra_event"``) for the same
+        reason series pairs are: the operator put these markets in one
+        event, so the resolution criteria are guaranteed identical apart
+        from the deadline.
+        """
+        import time as _time
+
+        if events is None:
+            try:
+                events = self.scanner.get_all_active_events(max_events=3000)
+            except AttributeError:
+                self.logger.warning(
+                    "Scanner missing get_all_active_events; intra-event discovery skipped."
+                )
+                return 0
+            except Exception as e:
+                self.logger.warning(f"Intra-event discovery: event fetch failed: {e}")
+                return 0
+        if not events:
+            return 0
+
+        existing_pair_keys = {
+            tuple(sorted((str(p.get("early_id", "")), str(p.get("late_id", "")))))
+            for p in self.discovered_pairs
+        }
+
+        new_count = 0
+        backfilled = False
+        events_with_chains = 0
+        now = _time.time()
+
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            markets = ev.get("markets")
+            if not isinstance(markets, list) or len(markets) < 2:
+                continue
+
+            # Keep only the legs we can actually price-check: tradeable
+            # binary YES/NO markets with a parseable endDate.
+            candidates: List[Dict[str, Any]] = []
+            for m in markets:
+                if not isinstance(m, dict) or not m.get("id"):
+                    continue
+                if m.get("closed"):
+                    continue
+                outcomes = m.get("outcomes")
+                if isinstance(outcomes, str):
+                    try:
+                        outcomes = json.loads(outcomes)
+                    except Exception:
+                        outcomes = None
+                if not isinstance(outcomes, list) or len(outcomes) != 2:
+                    continue
+                # Prefer the resolution date parsed from the question
+                # title; fall back to endDate when the title has no
+                # deadline phrase. This sorts pairs by when each market
+                # actually RESOLVES, not when trading closes — which
+                # are different on recycled Polymarket markets.
+                end_dt = self._market_resolution_date(m)
+                if end_dt is None:
+                    continue
+                # Inject the parent event's slug into the market dict so
+                # downstream _event_slug() and the dashboard's "Open on
+                # Polymarket" link both find it. Markets fetched via
+                # /events nested-children don't carry an ``events`` array,
+                # so without this the per-leg link would be missing.
+                ev_slug = ev.get("slug") or ""
+                ev_id = ev.get("id")
+                if ev_slug and not m.get("events"):
+                    m["events"] = [{"slug": ev_slug, "id": ev_id}]
+                candidates.append({"market": m, "end": end_dt})
+
+            if len(candidates) < 2:
+                continue
+
+            candidates.sort(key=lambda x: x["end"])
+            # Drop markets that share an endDate (resolution race conditions
+            # produce duplicates on Polymarket sometimes).
+            uniq: List[Dict[str, Any]] = []
+            seen_ends = set()
+            for c in candidates:
+                key = c["end"].isoformat()
+                if key in seen_ends:
+                    continue
+                seen_ends.add(key)
+                uniq.append(c)
+            if len(uniq) < 2:
+                continue
+
+            event_title = (ev.get("title") or ev.get("slug") or "event")[:80]
+            event_slug = ev.get("slug") or ""
+            events_with_chains += 1
+
+            for i in range(len(uniq) - 1):
+                early_m = uniq[i]["market"]
+                late_m = uniq[i + 1]["market"]
+                # Same monotonic-deadline guard as series discovery: filters
+                # out non-calendar shapes (rolling 5-min windows, sports
+                # matchups) that happen to share an event slug.
+                if not (
+                    self._has_monotonic_deadline(early_m.get("question", ""))
+                    and self._has_monotonic_deadline(late_m.get("question", ""))
+                ):
+                    continue
+                if not self._validate_temporal_containment(early_m, late_m):
+                    continue
+                # Inject markets into the caller's map BEFORE the
+                # already-known check so previously-saved intra-event
+                # pairs also become price-checkable on every scan.
+                if market_map is not None:
+                    market_map.setdefault(early_m["id"], early_m)
+                    market_map.setdefault(late_m["id"], late_m)
+                pair_tuple = tuple(sorted((str(early_m["id"]), str(late_m["id"]))))
+                if pair_tuple in existing_pair_keys:
+                    # Self-heal old entries that pre-date the late_question
+                    # / event_slug fields (same pattern as series).
+                    early_q_now = early_m.get("question", "") or ""
+                    late_q_now = late_m.get("question", "") or ""
+                    for sp in self.discovered_pairs:
+                        sp_tuple = tuple(sorted((str(sp.get("early_id", "")),
+                                                 str(sp.get("late_id", "")))))
+                        if sp_tuple != pair_tuple:
+                            continue
+                        if not sp.get("late_question") and late_q_now:
+                            sp["late_question"] = late_q_now
+                            backfilled = True
+                        if not sp.get("event_slug") and event_slug:
+                            sp["event_slug"] = event_slug
+                            backfilled = True
+                        if not sp.get("early_question") and early_q_now:
+                            sp["early_question"] = early_q_now
+                            backfilled = True
+                    continue
+                existing_pair_keys.add(pair_tuple)
+
+                early_q = early_m.get("question", "") or ""
+                late_q = late_m.get("question", "") or ""
+
+                self.discovered_pairs.append({
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "description": (
+                        f"Polymarket event '{event_title}': "
+                        f"{uniq[i]['end'].date()} → {uniq[i + 1]['end'].date()}"
+                    ),
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "resolution_match_confidence": 1.0,
+                    "discovery_method": "intra_event",
+                    "event_slug": event_slug,
+                })
+
+                pair_key = self._pair_key(early_m["id"], late_m["id"])
+                self.confirmed_pairs[pair_key] = {
+                    "confirmed_at": now,
+                    "confirmed_by": "intra_event_auto",
+                    "early_id": early_m["id"],
+                    "late_id": late_m["id"],
+                    "early_question": early_q,
+                    "late_question": late_q,
+                    "event_slug": event_slug,
+                    "discovery_method": "intra_event",
+                }
+                new_count += 1
+                self.logger.info(
+                    f"🧩 Intra-event pair: '{event_title[:50]}' "
+                    f"({uniq[i]['end'].date()} ⊂ {uniq[i + 1]['end'].date()})"
+                )
+
+        if new_count > 0:
+            self._save_discovered_pairs()
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self.logger.info(
+                f"🧩 Intra-event discovery: {new_count} new auto-confirmed "
+                f"pair(s) across {events_with_chains} multi-market events"
+            )
+        elif backfilled:
+            self._save_discovered_pairs()
+            self.logger.info("🧩 Intra-event discovery: backfilled metadata on existing pairs")
+        return new_count
+
     def _regex_discover_obvious_pairs(self, all_markets: List[Dict]) -> int:
         """Fast AI-free pre-pass: find pairs whose normalized title is IDENTICAL
         (after stripping temporal words). These are literally the same bet with
@@ -730,10 +1537,16 @@ class CalendarArbitrageStrategy(BaseStrategy):
         for norm_q, markets in by_norm.items():
             if len(markets) < 2:
                 continue
-            # Attach parsed end dates, drop markets without them
+            # Sort by RESOLUTION DATE (parsed from question title), not the
+            # raw endDate field. Polymarket recycles markets and sometimes
+            # leaves endDate set to a date that doesn't match the title's
+            # actual deadline. Sorting by endDate would put a "by May 31"
+            # market BEFORE a "by May 6" one if its endDate happened to be
+            # earlier — producing inverted pairs. The resolution date
+            # parsed from the title is the source of truth.
             dated = []
             for m in markets:
-                d = self._parse_end_date(m.get('endDate'))
+                d = self._market_resolution_date(m)
                 if d is not None:
                     dated.append((m, d))
             dated.sort(key=lambda x: x[1])
@@ -745,7 +1558,11 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 for j in range(i + 1, len(dated)):
                     late_m, late_end = dated[j]
                     if early_end >= late_end:
-                        continue  # Same endDate or inverted → not a calendar pair
+                        continue  # Same date or inverted → not a calendar pair
+                    # Defense in depth: also let the unified validator have
+                    # a say (rejects past-resolution early legs etc.).
+                    if not self._validate_temporal_containment(early_m, late_m):
+                        continue
                     key_tuple = tuple(sorted((early_m['id'], late_m['id'])))
                     if key_tuple in existing_pair_keys:
                         continue
@@ -756,6 +1573,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         "late_id": late_m['id'],
                         "description": f"Regex auto-match (identical normalized title): \"{norm_q[:80]}\"",
                         "early_question": early_m.get('question', ''),
+                        "late_question": late_m.get('question', ''),
                         "resolution_match_confidence": 1.0,
                         "discovery_method": "regex_exact",
                     })
@@ -773,7 +1591,7 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     new_count += 1
                     self.logger.info(
                         f"🎯 Auto-confirmed regex pair: '{norm_q[:60]}' "
-                        f"(early ends {early_end.date()}, late ends {late_end.date()})"
+                        f"(early resolves {early_end.date()}, late resolves {late_end.date()})"
                     )
 
         if new_count > 0:
@@ -782,7 +1600,247 @@ class CalendarArbitrageStrategy(BaseStrategy):
             self.logger.info(f"📐 Regex discovery: {new_count} new auto-confirmed pair(s)")
         return new_count
 
+    def _purge_pairs_with_invalid_titles(self) -> int:
+        """Drop saved pairs whose question titles parse as inverted or past.
+
+        Older code added pairs based on Polymarket's ``endDate`` field even
+        when the resolution criterion parsed from the title was different
+        (e.g. "by May 8" market with endDate=May 31 → mis-sorted ahead of
+        "by May 15"). After upgrading the parser, we want those bad
+        entries gone NOW, not in 5 missing-scan cycles.
+
+        Title-only check — no API calls, no orderbook fetches. Drops a
+        pair when:
+          - both titles parse to a resolution date AND early >= late
+          - early's parsed date is already past
+        Pairs without a parseable deadline (rare — "before his term
+        ends") are LEFT alone; they fall back to the existing missing-
+        scans purge path.
+        """
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        # Pull raw endDates from the price snapshot — they're stored
+        # there per pair when the monitoring loop builds an entry. Using
+        # this to cross-check stale-but-still-active markets like the
+        # Hormuz "by end of April" leg that has endDate=2026-04-30 even
+        # though the title parses (after year-bump) to 2027-04-30.
+        snap = {}
+        try:
+            import os
+            if os.path.exists(self.PRICE_SNAPSHOT_FILE):
+                with open(self.PRICE_SNAPSHOT_FILE, "r", encoding="utf-8") as f:
+                    snap = json.load(f) or {}
+        except Exception:
+            snap = {}
+        kept: List[Dict[str, Any]] = []
+        dropped: List[Dict[str, Any]] = []
+        for p in self.discovered_pairs:
+            eq = p.get("early_question") or ""
+            lq = p.get("late_question") or ""
+            method = p.get("discovery_method")
+            # Drop legacy artifacts: pairs with no late_question saved AND
+            # no discovery_method are leftover entries from the original LLM
+            # clustering pass (e.g. "Billionaire wealth tax on California
+            # ballot" matched against "passes in California election 2026"
+            # — different RESOLUTION criteria, not just different deadlines,
+            # so calendar-arb math doesn't apply). Once these legacy "?"
+            # pairs are removed they won't be re-discovered by the strict
+            # series/intra_event/regex paths.
+            if not lq and not method:
+                dropped.append(p); continue
+            # Snapshot-anchored stale check: if either leg's raw endDate
+            # is already past, the market is being finalized (or worse,
+            # forgotten by Polymarket) and its orderbook quotes are
+            # untrustworthy. Drop the pair.
+            pair_key = self._pair_key(p.get("early_id", ""), p.get("late_id", ""))
+            s = snap.get(pair_key) or {}
+            stale = False
+            for fld in ("early_end", "late_end"):
+                v = s.get(fld)
+                if not v: continue
+                d = self._parse_end_date(v)
+                if d is not None and d <= now_utc:
+                    stale = True
+                    break
+            if stale:
+                dropped.append(p); continue
+            e_res = self._resolution_date_from_question(eq)
+            l_res = self._resolution_date_from_question(lq)
+            # Keep pairs we can't fully parse — let the slow path handle them
+            if e_res is None or l_res is None:
+                kept.append(p); continue
+            if e_res >= l_res or e_res <= now_utc:
+                dropped.append(p)
+            else:
+                kept.append(p)
+        if not dropped:
+            return 0
+        self.discovered_pairs = kept
+        # Also remove from confirmed/pending/rejected so the dashboard
+        # stops showing ghost cards for them.
+        dropped_keys = {self._pair_key(p["early_id"], p["late_id"]) for p in dropped}
+        self.confirmed_pairs = {k: v for k, v in self.confirmed_pairs.items() if k not in dropped_keys}
+        self.pending_pairs   = {k: v for k, v in self.pending_pairs.items()   if k not in dropped_keys}
+        self.rejected_pairs  = {k: v for k, v in self.rejected_pairs.items()  if k not in dropped_keys}
+        self._save_discovered_pairs()
+        self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+        self._save_json_state(self.PENDING_FILE,   self.pending_pairs)
+        self._save_json_state(self.REJECTED_FILE,  self.rejected_pairs)
+        sample = ", ".join((p.get("early_question") or "")[:40] for p in dropped[:3])
+        self.logger.info(
+            f"🧹 Purged {len(dropped)} pair(s) with inverted/past titles. Sample: {sample}"
+        )
+        return len(dropped)
+
+    def _purge_pairs_with_stale_markets(self, market_map: Dict[str, Dict]) -> int:
+        """Purge saved pairs whose live market endDate is already past.
+
+        Complements the title-based purge: that runs before market fetch
+        and catches pairs by their saved questions, but it can't see
+        Polymarket's actual ``endDate`` when the snapshot for the pair
+        hasn't been built yet (e.g. a brand-new pair the monitoring
+        loop just rejected on validation). This pass runs AFTER market
+        fetch — using the live ``market_map`` — so any stale-market
+        pair is dropped on the same scan instead of waiting 5 missing-
+        scan cycles via _cleanup_expired_pairs.
+        """
+        from datetime import datetime, timezone
+        now_utc = datetime.now(timezone.utc)
+        kept: List[Dict[str, Any]] = []
+        dropped: List[Dict[str, Any]] = []
+        for p in self.discovered_pairs:
+            early = market_map.get(p.get("early_id"))
+            late  = market_map.get(p.get("late_id"))
+            stale = False
+            for m in (early, late):
+                if not m: continue
+                d = self._parse_end_date(m.get("endDate"))
+                if d is not None and d <= now_utc:
+                    stale = True
+                    break
+            if stale:
+                dropped.append(p)
+            else:
+                kept.append(p)
+        if not dropped:
+            return 0
+        self.discovered_pairs = kept
+        dropped_keys = {self._pair_key(p["early_id"], p["late_id"]) for p in dropped}
+        self.confirmed_pairs = {k: v for k, v in self.confirmed_pairs.items() if k not in dropped_keys}
+        self.pending_pairs   = {k: v for k, v in self.pending_pairs.items()   if k not in dropped_keys}
+        self.rejected_pairs  = {k: v for k, v in self.rejected_pairs.items()  if k not in dropped_keys}
+        self._save_discovered_pairs()
+        self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+        self._save_json_state(self.PENDING_FILE,   self.pending_pairs)
+        self._save_json_state(self.REJECTED_FILE,  self.rejected_pairs)
+        sample = ", ".join((p.get("early_question") or "")[:40] for p in dropped[:3])
+        self.logger.info(
+            f"🧹 Purged {len(dropped)} pair(s) with stale market endDates. Sample: {sample}"
+        )
+        return len(dropped)
+
+    def _drain_dashboard_approvals(self) -> int:
+        """Apply pending confirm/reject commands queued by the dashboard.
+
+        The dashboard process (read-only otherwise) writes user clicks
+        on ✅/❌ buttons into ``data/dashboard_approvals.json`` as a
+        list of ``{pair_key, action, queued_at, source}`` entries. The
+        bot drains that list at the start of every scan, applies the
+        moves between pending / confirmed / rejected dicts, and clears
+        the file. This keeps the dashboard write path simple (one
+        append-only file) and avoids race conditions with the bot's
+        own state writes.
+        """
+        path = os.path.join("data", "dashboard_approvals.json")
+        if not os.path.exists(path):
+            return 0
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                queue = json.load(f) or []
+        except Exception as e:
+            self.logger.warning(f"approvals queue parse failed: {e}")
+            return 0
+        if not isinstance(queue, list) or not queue:
+            return 0
+        applied = 0
+        import time as _time
+        now = _time.time()
+        for entry in queue:
+            if not isinstance(entry, dict): continue
+            pair_key = entry.get("pair_key")
+            action = entry.get("action")
+            if not pair_key or action not in ("confirm", "reject"): continue
+            # Locate the pair in pending — if it's not there we silently
+            # skip (already approved via Telegram, already purged, etc.)
+            state = self.pending_pairs.pop(pair_key, None)
+            if state is None:
+                # Maybe the user clicked confirm on a pair that was already
+                # confirmed from another source — also skip without logging
+                # an error.
+                self.logger.debug(
+                    f"approval queued for {pair_key} but not in pending_pairs; ignoring"
+                )
+                continue
+            if action == "confirm":
+                self.confirmed_pairs[pair_key] = {
+                    "confirmed_at": now,
+                    "confirmed_by": "dashboard",
+                    "early_id":  state.get("early_id"),
+                    "late_id":   state.get("late_id"),
+                    "early_question": state.get("early_question"),
+                    "late_question": state.get("late_question"),
+                    **{k: v for k, v in state.items() if k not in
+                       ("alerted", "opened_at")},
+                }
+                self.logger.info(
+                    f"✅ Dashboard confirmed pair {pair_key}: "
+                    f"{(state.get('early_question') or '')[:50]}"
+                )
+            else:  # reject
+                self.rejected_pairs[pair_key] = {
+                    "rejected_at": now,
+                    "rejected_by": "dashboard",
+                    "early_id":  state.get("early_id"),
+                    "late_id":   state.get("late_id"),
+                    "early_question": state.get("early_question"),
+                    "late_question": state.get("late_question"),
+                }
+                self.logger.info(
+                    f"❌ Dashboard rejected pair {pair_key}: "
+                    f"{(state.get('early_question') or '')[:50]}"
+                )
+            applied += 1
+        # Always persist + clear the queue so a parse error doesn't loop.
+        if applied:
+            self._save_json_state(self.PENDING_FILE,   self.pending_pairs)
+            self._save_json_state(self.CONFIRMED_FILE, self.confirmed_pairs)
+            self._save_json_state(self.REJECTED_FILE,  self.rejected_pairs)
+        try:
+            os.remove(path)
+        except Exception:
+            try:
+                with open(path, "w", encoding="utf-8") as f: f.write("[]")
+            except Exception:
+                pass
+        if applied:
+            self.logger.info(f"🔘 Drained {applied} dashboard approval(s)")
+        return applied
+
     async def scan(self) -> List[Dict[str, Any]]:
+        # Drain dashboard approvals before anything else so user clicks
+        # take effect on the same scan they were submitted.
+        self._drain_dashboard_approvals()
+
+        # Fast pre-flight: drop any saved pair whose question titles already
+        # parse as inverted (early resolution > late) or past. These were
+        # added by older code that trusted Polymarket's endDate field even
+        # when the resolution criterion (parsed from the title) was
+        # different. Without this immediate purge they'd persist for 5
+        # missing-scan cycles before _cleanup_expired_pairs caught them
+        # — meanwhile producing fake +X% locked-profit cards. Title-only
+        # check, no orderbook fetches, runs in microseconds.
+        self._purge_pairs_with_invalid_titles()
+
         all_markets = self.scanner.get_all_active_markets(max_markets=5000)
         if not all_markets:
             return []
@@ -792,6 +1850,41 @@ class CalendarArbitrageStrategy(BaseStrategy):
         market_map = {m['id']: m for m in all_markets}
         # Cache for _check_escalations (avoids a second scanner fetch).
         self._last_market_map = market_map
+
+        # Second purge pass — uses live market_map endDate to drop pairs
+        # with markets whose Polymarket endDate is already past, even if
+        # the title parser bumped the year (e.g. Hormuz "by end of April"
+        # whose title parses to 2027 but whose Polymarket endDate is
+        # 2026-04-30 already past). The title-only purge above couldn't
+        # see this; here we have the live truth.
+        self._purge_pairs_with_stale_markets(market_map)
+
+        # --- Discovery from Polymarket events metadata (ground truth) ---
+        # Two complementary shapes — both are calendar arbitrage that the
+        # operator has already declared share resolution criteria. Fetch
+        # the events once, pass to both methods so we don't pay for the
+        # HTTP call twice.
+        # max_events=10000: Polymarket reports ~10k active+open events
+        # globally, and tail-end multi-deadline chains (e.g.
+        # trump-announces-us-blockade-of-hormuz-lifted-by, 4 active
+        # markets) sit beyond offset 3000. The earlier 3000 cap was
+        # silently dropping them. The added pagination cost is ~8s per
+        # scan but the data flows through both discovery passes for free.
+        try:
+            _events = self.scanner.get_all_active_events(max_events=10000)
+        except Exception as e:
+            self.logger.warning(f"Event fetch failed (series + intra-event skipped): {e}")
+            _events = []
+
+        # Series shape: each deadline = its own event sharing a series slug
+        # (e.g. russia-x-ukraine-ceasefire across 6 events).
+        self._series_discover_pairs(market_map=market_map, events=_events)
+
+        # Intra-event shape: ONE event with N binary markets inside, each at
+        # a different deadline (e.g. trump-announces-us-blockade-of-hormuz-
+        # lifted-by — 12 markets, no series field). Without this path the
+        # bot misses dozens of valid calendar chains.
+        self._intra_event_discover_pairs(market_map=market_map, events=_events)
 
         # --- Regex-based Discovery (AI-free pre-pass) ---
         # Catches pairs whose titles are identical after date-stripping. Runs
@@ -899,9 +1992,25 @@ class CalendarArbitrageStrategy(BaseStrategy):
             tid_early, tid_late = self._get_token_ids(early), self._get_token_ids(late)
             if len(tid_early) < 2 or len(tid_late) < 2: continue
 
-            no_early, yes_late = tid_early[1], tid_late[0]
-            ask_no, ask_yes = self._best_ask(no_early), self._best_ask(yes_late)
-            bid_no, bid_yes = self._best_bid(no_early), self._best_bid(yes_late)
+            yes_early, no_early = tid_early[0], tid_early[1]
+            yes_late,  no_late  = tid_late[0], tid_late[1]
+            # Fetch all four unique orderbooks for this pair in parallel,
+            # each with a timeout. Previously this was 8 sequential blocking
+            # calls (best_ask + best_bid each re-fetched the same book);
+            # now it's 4 concurrent fetches with no re-fetch and no hang
+            # risk. ~8x faster per pair and immune to a single stuck book.
+            books = await self._fetch_books_parallel([yes_early, no_early, yes_late, no_late])
+            # The arb leg we trade: NO on early + YES on late.
+            ask_no  = self._ask_from_book(books.get(no_early))
+            ask_yes = self._ask_from_book(books.get(yes_late))
+            bid_no  = self._bid_from_book(books.get(no_early))
+            bid_yes = self._bid_from_book(books.get(yes_late))
+            # The OTHER side of each market — for the dashboard's full
+            # YES/NO ask+bid view of both legs.
+            ask_yes_e = self._ask_from_book(books.get(yes_early))
+            bid_yes_e = self._bid_from_book(books.get(yes_early))
+            ask_no_l  = self._ask_from_book(books.get(no_late))
+            bid_no_l  = self._bid_from_book(books.get(no_late))
 
             pair_key = self._pair_key(pair['early_id'], pair['late_id'])
             days = self._days_until_close(late.get("endDate"))
@@ -955,11 +2064,31 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         he = self.translator.lookup(src)
                         if he:
                             snap_entry[f_he] = he
+            # Per-leg pricing for the dashboard. Show the full YES/NO
+            # ask+bid for both markets — the same view Polymarket itself
+            # exposes — so the user can see exactly what each leg looks
+            # like, not just the trade-relevant pair (NO_early + YES_late).
+            #
+            # Naming convention: ``<side>_<token>_<leg>`` where:
+            #   side  ∈ {ask, bid}     (price you'd pay / receive)
+            #   token ∈ {yes, no}      (which outcome)
+            #   leg   ∈ {early, late}  (which market)
+            #
+            # Legacy keys ``ask_no_early`` and ``ask_yes_late`` are kept
+            # so existing dashboard code that reads them still works.
+            def _price(q):
+                return q["price"] if q else None
+            snap_entry["ask_yes_early"] = _price(ask_yes_e)
+            snap_entry["bid_yes_early"] = _price(bid_yes_e)
+            snap_entry["ask_no_early"]  = _price(ask_no)
+            snap_entry["bid_no_early"]  = _price(bid_no)
+            snap_entry["ask_yes_late"]  = _price(ask_yes)
+            snap_entry["bid_yes_late"]  = _price(bid_yes)
+            snap_entry["ask_no_late"]   = _price(ask_no_l)
+            snap_entry["bid_no_late"]   = _price(bid_no_l)
             if ask_no and ask_yes:
                 total_cost = ask_no["price"] + ask_yes["price"]
                 snap_entry.update({
-                    "ask_no_early": ask_no["price"],
-                    "ask_yes_late": ask_yes["price"],
                     "total_cost": total_cost,
                     "entry_profit_usd": round(1.0 - total_cost, 4),
                     "entry_profit_pct": round((1.0 - total_cost) * 100, 2),
@@ -969,8 +2098,6 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 })
             if bid_no and bid_yes:
                 exit_value = bid_no["price"] + bid_yes["price"]
-                snap_entry["bid_no_early"] = bid_no["price"]
-                snap_entry["bid_yes_late"] = bid_yes["price"]
                 snap_entry["exit_value"] = round(exit_value, 4)
             price_snapshot[pair_key] = snap_entry
             healthy_pair_keys.add(pair_key)
@@ -1095,6 +2222,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "rejected": len(self.rejected_pairs),
                 "trades_entered": int(self.stats.get("trades_entered", 0)),
                 "trades_exited": int(self.stats.get("trades_exited", 0)),
+                "wins": int(self.stats.get("wins", 0)),
+                "losses": int(self.stats.get("losses", 0)),
+                "total_pnl_usd": round(float(self.stats.get("total_pnl", 0.0)), 4),
                 "open_positions": len(getattr(self, "open_positions", {}) or {}),
                 "loop": int(self.stats.get("scans", 0)),
             }
@@ -1123,6 +2253,9 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 "stats": {
                     "trades_entered": int(self.stats.get("trades_entered", 0)),
                     "trades_exited": int(self.stats.get("trades_exited", 0)),
+                    "wins": int(self.stats.get("wins", 0)),
+                    "losses": int(self.stats.get("losses", 0)),
+                    "total_pnl_usd": round(float(self.stats.get("total_pnl", 0.0)), 4),
                 },
                 "open_positions": len(getattr(self, "open_positions", {}) or {}),
                 "pair_counts": {
@@ -1131,8 +2264,10 @@ class CalendarArbitrageStrategy(BaseStrategy):
                     "pending": len(self.pending_pairs),
                     "rejected": len(self.rejected_pairs),
                 },
+                "dry_run": bool(getattr(self, "dry_run", False)),
                 "strategy": {
                     "name": "CalendarArbitrage",
+                    "dry_run": bool(getattr(self, "dry_run", False)),
                     "min_profit_threshold": float(self.min_profit_threshold),
                     "early_exit_threshold": float(self.early_exit_threshold),
                     "min_annualized_roi": float(self.min_annualized_roi),
@@ -1191,10 +2326,43 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 if size <= 0:
                     return True
 
+        # C3: rollback exhausted → we hold a NAKED leg. Persist it so the
+        # operator (and dashboard) can see it, and fire an urgent Telegram
+        # alert. Silent naked exposure is the worst failure mode for a
+        # money bot — one unhedged leg can lose the full position value.
         self.logger.critical(
             f"🚨 ROLLBACK EXHAUSTED for {token_id[:12]} — tried prices {attempts}. "
             f"MANUAL INTERVENTION REQUIRED: hold {size:.2f} units open."
         )
+        try:
+            import time as _t
+            path = os.path.join("data", "naked_exposure.json")
+            existing = []
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    existing = json.load(f) or []
+            if not isinstance(existing, list):
+                existing = []
+            existing.append({
+                "token_id": token_id,
+                "units_open": round(float(size), 4),
+                "tried_prices": attempts,
+                "detected_at": _t.time(),
+                "resolved": False,
+            })
+            self._save_json_state(path, existing)
+        except Exception as e:
+            self.logger.error(f"Failed to record naked exposure: {e}")
+        if self.telegram and getattr(self.telegram, "enabled", False):
+            try:
+                await self.telegram.send_notice(
+                    f"🚨🚨 NAKED EXPOSURE — manual action needed\n"
+                    f"Token {token_id[:16]}… — {size:.2f} units could NOT be "
+                    f"rolled back (tried {attempts}).\n"
+                    f"Hedge or close this leg manually on Polymarket NOW."
+                )
+            except Exception as e:
+                self.logger.debug(f"naked-exposure telegram alert failed: {e}")
         return False
 
     async def enter_position(self, opportunity: Dict[str, Any]) -> bool:
@@ -1233,44 +2401,54 @@ class CalendarArbitrageStrategy(BaseStrategy):
             )
             return False
 
-        # CRITICAL: pre-trade balance check. Prevents submitting the first leg and
-        # then discovering we can't afford the second.
-        required_usdc = (fill_no["avg_price"] + fill_yes["avg_price"]) * size
-        try:
-            balance = await self.executor.get_balance()
-        except Exception as e:
-            self.logger.error(f"⚠️ Balance check failed, refusing to trade: {e}")
-            return False
-        # Keep a small buffer for rounding/fees on the exchange side.
-        if balance < required_usdc * 1.02:
-            self.logger.warning(
-                f"⚠️ Insufficient USDC: balance=${balance:.2f} < required=${required_usdc * 1.02:.2f} "
-                f"(size={size}, combined_ask=${(fill_no['avg_price'] + fill_yes['avg_price']):.4f})"
-            )
-            return False
-
+        # CRITICAL SECTION (C2): the balance-check→submit sequence must be
+        # atomic across strategies. calendar_arb and duplicate_arb share one
+        # connection; without this lock both could read the same balance,
+        # both pass the affordability check, and both submit — overdrafting
+        # the wallet. The shared asyncio.Lock serializes the read→submit so
+        # the second strategy re-checks against the post-trade balance.
+        # Rollback (_emergency_sell below) stays OUTSIDE the lock: it only
+        # re-credits balance, so the other strategy seeing the pre-rollback
+        # (debited) balance is conservative, not unsafe.
         tier = opportunity.get("tier", "probe")
-        self.logger.info(f"🧮 Calendar Arbitrage Opportunity [tier={tier.upper()}]:")
-        self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} (avg: ${fill_no['avg_price']:.4f})")
-        self.logger.info(f"   Late(YES) ask: ${price_yes_late:.4f} (avg: ${fill_yes['avg_price']:.4f})")
-        self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | With slippage: ${total_cost_with_slippage:.4f}")
-        self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
-        self.logger.info(f"   Balance: ${balance:.2f} | Required: ${required_usdc:.2f} | Size: {size}")
-        self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
-        self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
+        async with self.connection.trade_lock:
+            # pre-trade balance check. Prevents submitting the first leg and
+            # then discovering we can't afford the second.
+            required_usdc = (fill_no["avg_price"] + fill_yes["avg_price"]) * size
+            try:
+                balance = await self.executor.get_balance()
+            except Exception as e:
+                self.logger.error(f"⚠️ Balance check failed, refusing to trade: {e}")
+                return False
+            # Keep a small buffer for rounding/fees on the exchange side.
+            if balance < required_usdc * 1.02:
+                self.logger.warning(
+                    f"⚠️ Insufficient USDC: balance=${balance:.2f} < required=${required_usdc * 1.02:.2f} "
+                    f"(size={size}, combined_ask=${(fill_no['avg_price'] + fill_yes['avg_price']):.4f})"
+                )
+                return False
 
-        # Execute both legs concurrently. FOK (Fill-Or-Kill) guarantees all-or-nothing
-        # per leg at the limit price — no partial fills, no lingering limit orders.
-        tasks = [
-            self.executor.execute_trade(
-                token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"], order_type="FOK"
-            ),
-            self.executor.execute_trade(
-                token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"], order_type="FOK"
-            ),
-        ]
+            self.logger.info(f"🧮 Calendar Arbitrage Opportunity [tier={tier.upper()}]:")
+            self.logger.info(f"   Early(NO) ask: ${price_no_early:.4f} (avg: ${fill_no['avg_price']:.4f})")
+            self.logger.info(f"   Late(YES) ask: ${price_yes_late:.4f} (avg: ${fill_yes['avg_price']:.4f})")
+            self.logger.info(f"   Total cost: ${opportunity['total_cost']:.4f} | With slippage: ${total_cost_with_slippage:.4f}")
+            self.logger.info(f"   Annualized ROI: {opportunity.get('annualized_roi', 0):.1%} ({opportunity.get('days_until_close', 0):.1f} days)")
+            self.logger.info(f"   Balance: ${balance:.2f} | Required: ${required_usdc:.2f} | Size: {size}")
+            self.logger.info(f"   Early: {opportunity['early_question'][:60]}")
+            self.logger.info(f"   Late:  {opportunity['late_question'][:60]}")
 
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+            # Execute both legs concurrently. FOK (Fill-Or-Kill) guarantees all-or-nothing
+            # per leg at the limit price — no partial fills, no lingering limit orders.
+            tasks = [
+                self.executor.execute_trade(
+                    token_id=no_early_token, side="BUY", size=size, price=fill_no["avg_price"], order_type="FOK"
+                ),
+                self.executor.execute_trade(
+                    token_id=yes_late_token, side="BUY", size=size, price=fill_yes["avg_price"], order_type="FOK"
+                ),
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
 
         # Check both success flag AND filled size to guard against brokers that
         # return success on partial fills.
@@ -1508,9 +2686,17 @@ class CalendarArbitrageStrategy(BaseStrategy):
                 await self._emergency_sell(yes_late_token, size - filled)
 
             if no_ok and yes_ok:
-                # Calculate P&L
-                exit_value = (bid_no["price"] if bid_no else 0) + (bid_yes["price"] if bid_yes else 0)
-                pnl = exit_value - entry_cost - (2 * self.estimated_fee)
+                # Calculate P&L per share-pair AND in absolute dollars.
+                # ``entry_cost`` here is the per-share-pair cost, so total
+                # USD P&L = (exit - entry - fees) × size.
+                exit_no  = bid_no["price"]  if bid_no  else 0
+                exit_yes = bid_yes["price"] if bid_yes else 0
+                exit_value = exit_no + exit_yes
+                # Per-leg entry prices for the alert breakdown.
+                entry_no  = position.get("ask_no_early")  or 0
+                entry_yes = position.get("ask_yes_late")  or 0
+                pnl_per_share = exit_value - entry_cost - (2 * self.estimated_fee)
+                pnl_usd = pnl_per_share * size
                 
                 # Save to database if enabled
                 if self.use_database and self.db:
@@ -1518,12 +2704,12 @@ class CalendarArbitrageStrategy(BaseStrategy):
                         # Get position IDs from database
                         no_pos = await self.db.get_position_by_token(no_early_token, self.strategy_name)
                         yes_pos = await self.db.get_position_by_token(yes_late_token, self.strategy_name)
-                        
+
                         if no_pos:
                             await self.db.close_position(
                                 position_id=no_pos["id"],
-                                exit_price=bid_no["price"] if bid_no else 0,
-                                pnl=pnl / 2,  # Split P&L between legs
+                                exit_price=exit_no,
+                                pnl=pnl_usd / 2,  # Split P&L between legs
                             )
                             await self.db.record_trade(
                                 position_id=no_pos["id"],
@@ -1531,15 +2717,15 @@ class CalendarArbitrageStrategy(BaseStrategy):
                                 token_id=no_early_token,
                                 side="SELL",
                                 size=size,
-                                price=bid_no["price"] if bid_no else 0,
+                                price=exit_no,
                                 fee=self.estimated_fee * size,
                             )
-                        
+
                         if yes_pos:
                             await self.db.close_position(
                                 position_id=yes_pos["id"],
-                                exit_price=bid_yes["price"] if bid_yes else 0,
-                                pnl=pnl / 2,
+                                exit_price=exit_yes,
+                                pnl=pnl_usd / 2,
                             )
                             await self.db.record_trade(
                                 position_id=yes_pos["id"],
@@ -1547,32 +2733,59 @@ class CalendarArbitrageStrategy(BaseStrategy):
                                 token_id=yes_late_token,
                                 side="SELL",
                                 size=size,
-                                price=bid_yes["price"] if bid_yes else 0,
+                                price=exit_yes,
                                 fee=self.estimated_fee * size,
                             )
-                        
-                        self.logger.debug(f"💾 Saved exit to database. P&L: {pnl:.4f}")
+
+                        self.logger.debug(f"💾 Saved exit to database. P&L: ${pnl_usd:+.4f}")
                     except Exception as e:
                         self.logger.warning(f"Failed to save exit to database: {e}")
-                
+
                 # Clean up positions from memory and manager
                 self.open_positions.pop(no_early_token, None)
                 self.open_positions.pop(yes_late_token, None)
                 self.position_manager.remove_position(no_early_token)
                 self.position_manager.remove_position(yes_late_token)
-                
+
+                # Update strategy-level stats: trade count, total $ PnL, win/
+                # loss tally. Used both internally and in the heartbeat that
+                # the dashboard reads.
                 self.stats["trades_exited"] += 1
-                self.logger.info(f"✅ Successfully exited both legs (P&L: {pnl:.4f})")
-                # Notify Telegram so the user sees capital rotations in real time
+                self.stats["total_pnl"] = float(self.stats.get("total_pnl", 0.0)) + pnl_usd
+                if pnl_usd >= 0:
+                    self.stats["wins"] = int(self.stats.get("wins", 0)) + 1
+                else:
+                    self.stats["losses"] = int(self.stats.get("losses", 0)) + 1
+                # Persist immediately so the trade record survives a restart.
+                self._save_stats()
+                wins = int(self.stats.get("wins", 0))
+                losses = int(self.stats.get("losses", 0))
+                wr = (wins / (wins + losses) * 100) if (wins + losses) else 0.0
+
+                self.logger.info(
+                    f"✅ Exited both legs | size={size} | "
+                    f"NO {entry_no:.3f}→{exit_no:.3f} | YES {entry_yes:.3f}→{exit_yes:.3f} | "
+                    f"P&L ${pnl_usd:+.2f} ({pnl_per_share*100:+.1f}%) | "
+                    f"running ${self.stats['total_pnl']:+.2f} ({wr:.0f}% WR over {wins+losses})"
+                )
+
+                # Notify Telegram with full per-leg breakdown so the user can
+                # see exactly which leg moved and the running strategy stats.
                 if self.telegram and self.telegram.enabled:
                     try:
-                        early_q = (position.get("early_question") or "")[:60]
-                        pnl_pct = (pnl / entry_cost * 100) if entry_cost else 0.0
+                        early_q = (position.get("early_question") or "")[:55]
+                        late_q  = (position.get("late_question")  or "")[:55]
+                        pnl_pct = pnl_per_share * 100  # per-share-pair pct
+                        no_pnl_usd  = (exit_no  - entry_no)  * size
+                        yes_pnl_usd = (exit_yes - entry_yes) * size
+                        emoji = "💰" if pnl_usd >= 0 else "📉"
                         await self.telegram.send_notice(
-                            f"💰 Early exit @ ${pnl:+.4f} ({pnl_pct:+.1f}%)\n"
-                            f"   Early: {early_q}\n"
-                            f"   Exit value ${exit_value:.4f} vs entry ${entry_cost:.4f} "
-                            f"(size={size})"
+                            f"{emoji} Pair exit @ ${pnl_usd:+.2f} ({pnl_pct:+.1f}%) · size {size}\n"
+                            f"📅 Early: {early_q}\n"
+                            f"   NO  bought {entry_no*100:.1f}¢ → sold {exit_no*100:.1f}¢   ({no_pnl_usd:+.2f})\n"
+                            f"📅 Late:  {late_q}\n"
+                            f"   YES bought {entry_yes*100:.1f}¢ → sold {exit_yes*100:.1f}¢  ({yes_pnl_usd:+.2f})\n"
+                            f"📊 Running: ${self.stats['total_pnl']:+.2f} · {wins}W/{losses}L · WR {wr:.0f}%"
                         )
                     except Exception as e:
                         self.logger.debug(f"Telegram exit notice failed: {e}")

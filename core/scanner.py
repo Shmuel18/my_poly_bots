@@ -114,13 +114,13 @@ class MarketScanner:
     ) -> List[Dict]:
         """
         מושך events (כל event יכול להכיל מספר markets).
-        
+
         Args:
             limit: מספר events מקסימלי
             offset: היסט
             active: רק events פעילים
             closed: כולל events סגורים
-            
+
         Returns:
             רשימת events
         """
@@ -132,17 +132,47 @@ class MarketScanner:
                 'active': str(active).lower(),
                 'closed': str(closed).lower()
             }
-            
+
             response = self.session.get(url, params=params, timeout=30)
             response.raise_for_status()
             events = response.json()
-            
+
             logger.debug(f"Fetched {len(events)} events")
             return events
-            
+
         except Exception as e:
             logger.error(f"Error fetching events: {e}")
             return []
+
+    def get_all_active_events(
+        self,
+        max_events: int = 3000,
+        batch_size: int = 500,
+    ) -> List[Dict]:
+        """Paginated fetch of active, non-closed events.
+
+        Each event in the response carries (a) its nested ``markets`` array
+        and (b) ``series`` / ``seriesSlug`` metadata when the event is part
+        of a Polymarket series (e.g. the "Russia x Ukraine ceasefire"
+        ladder). The calendar-arb strategy uses this as ground truth for
+        series-grouped multi-deadline pairs — far more reliable than
+        title regex or LLM clustering.
+
+        Returns a list of event dicts. Empty list on hard failure.
+        """
+        all_events: List[Dict] = []
+        offset = 0
+        logger.info(f"🔍 Scanning events (max: {max_events})...")
+        while len(all_events) < max_events:
+            batch = self.get_events(limit=batch_size, offset=offset, active=True, closed=False)
+            if not batch:
+                break
+            all_events.extend(batch)
+            if len(batch) < batch_size:
+                break
+            offset += batch_size
+        logger.info(f"✅ Found {len(all_events)} active events")
+        return all_events
     
     def filter_markets(
         self,

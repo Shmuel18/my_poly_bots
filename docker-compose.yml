@@ -1,0 +1,55 @@
+# Polybot — bot + dashboard as two containers sharing state via mounted
+# volumes. OPTIONAL: the production deploy is still bare systemd (see
+# deploy/). This is here for reproducible local runs and as a migration
+# path off the single-VPS SPOF.
+#
+#   docker compose up -d --build
+#   docker compose logs -f bot
+#   docker compose down
+#
+# Both services share ./data (JSON state) and ./logs, and read ./config
+# (containing .env) read-only. The bot writes the heartbeat; the dashboard
+# reads it and serves /healthz.
+
+services:
+  bot:
+    build: .
+    image: polybot
+    # DRY-RUN by default. Append --live ONLY when trading real money.
+    command: python run_calendar_bot.py --env config/.env --use-llm
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+    restart: on-failure
+    # Match the systemd unit's graceful-shutdown behaviour: SIGINT + 30s to
+    # unwind before SIGKILL.
+    stop_signal: SIGINT
+    stop_grace_period: 30s
+
+  dashboard:
+    build: .
+    image: polybot
+    command: uvicorn dashboard.app:app --host 0.0.0.0 --port 8080 --log-level warning
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ./config:/app/config:ro
+    environment:
+      # In a container there's no systemd, so the dashboard's
+      # _systemctl_status() returns "unknown" — /healthz uses heartbeat
+      # freshness instead, which is the reliable signal here.
+      - POLYBOT_DIR=/app
+      # Uncomment to require a token on the approve/reject endpoints:
+      # - POLYBOT_APPROVAL_TOKEN=change-me
+    restart: on-failure
+    depends_on:
+      - bot
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
