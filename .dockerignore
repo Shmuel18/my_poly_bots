@@ -1,0 +1,35 @@
+# Keep the image lean and secret-free. data/, logs/, and config/.env are
+# mounted at runtime — never baked into the image.
+.git
+.gitignore
+.claude
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+
+# Runtime state — mounted as volumes, must not be in the image
+data/
+logs/
+*.log
+
+# Secrets — mounted read-only at runtime
+config/.env
+.env
+
+# Local / editor noise
+.vscode
+.idea
+*.swp
+.DS_Store
+node_modules
+
+# Design handoff bundle, docs that don't belong in the runtime image
+*.md
+deploy/
